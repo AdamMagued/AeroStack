@@ -1,0 +1,84 @@
+{
+  "mach_reclamation_microbench": [
+    {
+      "block_size_mb": 64,
+      "dirty_time_ms": 5.391166000000003,
+      "dirty_throughput_gb_sec": 11.593039427834343,
+      "reclaim_time_us": 547.6250000000099,
+      "reclaim_throughput_gb_sec": 114.12919424788655,
+      "reuse_time_us": 2298.3749999999914,
+      "phys_footprint_reclaimed_mb": 64.0,
+      "reclaim_efficiency_pct": 100.0
+    },
+    {
+      "block_size_mb": 128,
+      "dirty_time_ms": 9.718167,
+      "dirty_throughput_gb_sec": 12.862507919446127,
+      "reclaim_time_us": 1135.457999999992,
+      "reclaim_throughput_gb_sec": 110.08773552170216,
+      "reuse_time_us": 4055.4169999999917,
+      "phys_footprint_reclaimed_mb": 128.0,
+      "reclaim_efficiency_pct": 100.0
+    },
+    {
+      "block_size_mb": 256,
+      "dirty_time_ms": 19.517458999999988,
+      "dirty_throughput_gb_sec": 12.809044456043186,
+      "reclaim_time_us": 2414.667000000009,
+      "reclaim_throughput_gb_sec": 103.53394484622478,
+      "reuse_time_us": 10584.74999999999,
+      "phys_footprint_reclaimed_mb": 256.0,
+      "reclaim_efficiency_pct": 100.0
+    },
+    {
+      "block_size_mb": 512,
+      "dirty_time_ms": 41.688916000000006,
+      "dirty_throughput_gb_sec": 11.993595611840805,
+      "reclaim_time_us": 5307.292000000019,
+      "reclaim_throughput_gb_sec": 94.21000389652542,
+      "reuse_time_us": 20945.499999999978,
+      "phys_footprint_reclaimed_mb": 512.0,
+      "reclaim_efficiency_pct": 100.0
+    }
+  ],
+  "sustained_stability": {
+    "cycles": 200,
+    "init_fp_mb": 9.437820434570312,
+    "final_fp_mb": 9.437820434570312,
+    "delta_fp_mb": 0.0,
+    "zero_creep_verified": true
+  },
+  "running_daemons_audit": {
+    "AeroStack": {
+      "running": false,
+      "total_phys_footprint_mb": 0.0,
+      "total_resident_size_mb": 0.0,
+      "processes": []
+    },
+    "OrbStack": {
+      "running": true,
+      "total_phys_footprint_mb": 1108.3419723510742,
+      "total_resident_size_mb": 317.0,
+      "processes": [
+        {
+          "pid": 29601,
+          "comm": "Or",
+          "phys_footprint_mb": 1034.5439071655273,
+          "resident_size_mb": 280.359375
+        },
+        {
+          "pid": 29609,
+          "comm": "Or",
+          "phys_footprint_mb": 73.79806518554688,
+          "resident_size_mb": 36.640625
+        }
+      ]
+    },
+    "Docker Desktop": {
+      "running": false,
+      "total_phys_footprint_mb": 0.0,
+      "total_resident_size_mb": 0.0,
+      "processes": []
+    }
+  }
+}

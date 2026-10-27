@@ -72,3 +72,5 @@ test_utun
 test_vz_network
 test_dns_sd
 bench_socketpair_dataplane
+virtiofs_io_audit
+benchmarks/virtiofs_io_audit

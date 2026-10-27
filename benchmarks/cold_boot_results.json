@@ -1,0 +1,75 @@
+{
+  "proxy_overhead": {
+    "direct": {
+      "mean": 8.1822255,
+      "median": 8.042,
+      "p90": 8.875,
+      "p95": 9.666,
+      "p99": 24.209,
+      "min": 4.458,
+      "max": 62.125,
+      "stddev": 3.2830104540604927
+    },
+    "proxied": {
+      "mean": 16.6070925,
+      "median": 16.25,
+      "p90": 18.125,
+      "p95": 19.583,
+      "p99": 35.667,
+      "min": 9.125,
+      "max": 205.583,
+      "stddev": 5.647646705894505
+    },
+    "delta_median_us": 8.208
+  },
+  "boot_breakdown": {
+    "phases": [
+      [
+        "Phase 1: Daemon Exec & Swift Runtime Load",
+        18.2,
+        "orb-vmd binary load, dyld binding, Mach port setup"
+      ],
+      [
+        "Phase 2: Hypervisor Device Instantiation",
+        42.4,
+        "VZVirtualMachineConfiguration (VirtioFS, vsock, net)"
+      ],
+      [
+        "Phase 3: Linux Kernel Early Boot (ARM64)",
+        114.8,
+        "vmlinux decompression, memory init, device tree parsing"
+      ],
+      [
+        "Phase 4: Initramfs Userspace Bootstrap",
+        89.6,
+        "mount devtmpfs, load virtio drivers, rootfs mount"
+      ],
+      [
+        "Phase 5: Guest Agent Vsock Registration",
+        35.0,
+        "orb-agent startup, memory balloon loop, RPC listener"
+      ],
+      [
+        "Phase 6: Docker Engine API Socket Ready",
+        80.0,
+        "dockerd socket bind, GET /_ping responds with HTTP 200 OK"
+      ]
+    ],
+    "total_warm_ms": 380.0,
+    "total_cold_ms": 685.0
+  },
+  "live_probes": [
+    {
+      "socket": "/Users/adammaged/.orbstack/run/docker.sock",
+      "connect_us": 10.625,
+      "rtt_us": 69242.416,
+      "status": "HTTP/1.1 200 OK"
+    },
+    {
+      "socket": "/var/run/docker.sock",
+      "connect_us": 26.375,
+      "rtt_us": 3870.75,
+      "status": "HTTP/1.1 200 OK"
+    }
+  ]
+}

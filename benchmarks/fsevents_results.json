@@ -1,0 +1,25 @@
+{
+  "single_event": {
+    "mean_us": 273.883652,
+    "median_us": 241.75,
+    "p90_us": 348.834,
+    "p95_us": 393.584,
+    "p99_us": 560.792,
+    "min_us": 185.167,
+    "max_us": 2408.667,
+    "stddev_us": 150.52536662031292
+  },
+  "burst_resilience": {
+    "burst_count": 500,
+    "drain_time_ms": 162.87516599999998,
+    "throughput_events_sec": 3069.8357047261584,
+    "dropped_events": 0
+  },
+  "tree_scalability": {
+    "total_files": 5000,
+    "polling_scan_ms": 21.718499999999974,
+    "polling_cpu_pct": 92.4,
+    "push_event_us": 609.833,
+    "aerostack_cpu_pct": 0.08
+  }
+}
