@@ -134,12 +134,32 @@ public final class MemoryBalloonController: @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "dev.orbstack_free.memory_controller", qos: .userInteractive)
     private let stateLock = NSLock()
+    public var vmQueue: DispatchQueue?
 
     public init(balloonDevice: MemoryBalloonDeviceProtocol? = nil, initialTargetMB: UInt64 = 512) {
         self.balloonDevice = balloonDevice
         self.currentTargetMB = initialTargetMB
         if let dev = balloonDevice {
             dev.targetVirtualMachineMemorySize = initialTargetMB * 1024 * 1024
+        }
+    }
+
+    public func attach(device: MemoryBalloonDeviceProtocol, queue: DispatchQueue? = nil) {
+        self.balloonDevice = device
+        if let q = queue {
+            self.vmQueue = q
+        }
+        let target = currentTargetMB * 1024 * 1024
+        updateBalloonTarget(bytes: target)
+    }
+
+    private func updateBalloonTarget(bytes: UInt64) {
+        if let q = self.vmQueue {
+            q.async { [weak self] in
+                self?.balloonDevice?.targetVirtualMachineMemorySize = bytes
+            }
+        } else {
+            self.balloonDevice?.targetVirtualMachineMemorySize = bytes
         }
     }
 
@@ -167,7 +187,7 @@ public final class MemoryBalloonController: @unchecked Sendable {
                 
                 if newTargetMB > activeTargetMB {
                     self.currentTargetMB = newTargetMB
-                    self.balloonDevice?.targetVirtualMachineMemorySize = newTargetMB * 1024 * 1024
+                    self.updateBalloonTarget(bytes: newTargetMB * 1024 * 1024)
                 }
                 self.stateLock.unlock()
 
@@ -211,7 +231,7 @@ public final class MemoryBalloonController: @unchecked Sendable {
 
                         if newTargetMB < activeTargetMB {
                             self.currentTargetMB = newTargetMB
-                            self.balloonDevice?.targetVirtualMachineMemorySize = newTargetMB * 1024 * 1024
+                            self.updateBalloonTarget(bytes: newTargetMB * 1024 * 1024)
                         }
                         self.stateLock.unlock()
 

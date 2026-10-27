@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"sync"
@@ -106,38 +105,88 @@ func (f *DockerForwarder) acceptLoop() {
 }
 
 func (f *DockerForwarder) proxyConn(clientConn net.Conn) {
+	log.Printf("[orb-agent:docker] Handling incoming vsock connection from %v", clientConn.RemoteAddr())
 	defer func() {
 		_ = clientConn.Close()
 		f.activeMu.Lock()
 		delete(f.activeConns, clientConn)
 		f.activeMu.Unlock()
+		log.Printf("[orb-agent:docker] Closed vsock connection from %v", clientConn.RemoteAddr())
 	}()
 
 	var dialer net.Dialer
 	dialer.Timeout = 3 * time.Second
 	backendConn, err := dialer.Dial("unix", f.config.DockerSockPath)
 	if err != nil {
+		log.Printf("[orb-agent:docker] ERROR: Failed to connect to dockerd at %s: %v", f.config.DockerSockPath, err)
 		return
 	}
 	defer backendConn.Close()
+	log.Printf("[orb-agent:docker] Successfully connected to dockerd at %s", f.config.DockerSockPath)
 
-	// Bidirectional zero-copy splicing with half-close handling
+	// Bidirectional chunk forwarding with immediate flush and logging
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// client -> backend
+	// client -> backend (macOS host -> guest dockerd)
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(backendConn, clientConn)
+		buf := make([]byte, 32*1024)
+		for {
+			nr, er := clientConn.Read(buf)
+			if nr > 0 {
+				previewLen := nr
+				if previewLen > 64 {
+					previewLen = 64
+				}
+				log.Printf("[orb-agent:docker] client -> dockerd: forwarding %d bytes: %q", nr, string(buf[:previewLen]))
+				nw, ew := backendConn.Write(buf[:nr])
+				if ew != nil {
+					log.Printf("[orb-agent:docker] Error writing to dockerd: %v", ew)
+					break
+				}
+				if nw != nr {
+					log.Printf("[orb-agent:docker] Short write to dockerd: %d != %d", nw, nr)
+					break
+				}
+			}
+			if er != nil {
+				log.Printf("[orb-agent:docker] client read finished: %v", er)
+				break
+			}
+		}
 		if cw, ok := backendConn.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}
 	}()
 
-	// backend -> client
+	// backend -> client (guest dockerd -> macOS host)
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(clientConn, backendConn)
+		buf := make([]byte, 32*1024)
+		for {
+			nr, er := backendConn.Read(buf)
+			if nr > 0 {
+				previewLen := nr
+				if previewLen > 64 {
+					previewLen = 64
+				}
+				log.Printf("[orb-agent:docker] dockerd -> client: returning %d bytes: %q (hex: %x)", nr, string(buf[:previewLen]), buf[:previewLen])
+				nw, ew := clientConn.Write(buf[:nr])
+				if ew != nil {
+					log.Printf("[orb-agent:docker] Error writing to vsock client: %v", ew)
+					break
+				}
+				if nw != nr {
+					log.Printf("[orb-agent:docker] Short write to vsock client: %d != %d", nw, nr)
+					break
+				}
+			}
+			if er != nil {
+				log.Printf("[orb-agent:docker] dockerd read finished: %v", er)
+				break
+			}
+		}
 		if cw, ok := clientConn.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}

@@ -199,15 +199,24 @@ Export the Docker host socket or link it to `/var/run/docker.sock`:
 
 ```bash
 # Point your standard Docker CLI to AeroStack
-export DOCKER_HOST="unix://$HOME/.orbstack/run/docker.sock"
+export DOCKER_HOST="unix://$HOME/.aerostack/run/docker.sock"
 
 # Verify with standard Docker commands
 docker version
-docker run --rm -it alpine uname -a
+docker run --rm alpine uname -a
+docker run --rm -v /Volumes/AdamSSD/antigravity_workspace:/workspace alpine ls -la /workspace
 docker compose up -d
 ```
 
-### 4. Linux MicroVM Workflow
+### 4. Automated Guest Asset Packaging Pipeline
+AeroStack packages its own minimal ARM64 Linux kernel and sparse rootfs image without external dependencies:
+
+```bash
+# Generate vmlinux, initramfs-virt, and rootfs.ext4
+./scripts/build_guest_assets.sh
+```
+
+### 5. Linux MicroVM Workflow
 Spin up isolated multi-distribution environments in milliseconds:
 
 ```bash

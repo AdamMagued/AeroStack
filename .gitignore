@@ -38,6 +38,10 @@ DerivedData/
 *.raw
 *.iso
 *.img
+*.ext4
+vmlinux
+initramfs*
+aerostack_runtime/
 
 # IPC and Socket Endpoints
 *.sock

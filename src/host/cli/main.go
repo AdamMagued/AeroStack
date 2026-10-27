@@ -99,6 +99,10 @@ will run "uname -a" on Linux, and is equivalent to:
 
 func getControlSocketPath() string {
 	home, _ := os.UserHomeDir()
+	aeroSock := filepath.Join(home, ".aerostack", "run", "vmcontrol.sock")
+	if _, err := os.Stat(aeroSock); err == nil {
+		return aeroSock
+	}
 	return filepath.Join(home, ".orbstack", "run", "vmcontrol.sock")
 }
 

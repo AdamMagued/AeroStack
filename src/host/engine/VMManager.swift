@@ -90,10 +90,14 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
     public private(set) var ipAddress: String = "-"
     
     private let stateLock = NSLock()
+    private let vmQueue = DispatchQueue(label: "com.orbstack_free.vm_queue")
     private var consoleInputPipe = Pipe()
     private var consoleOutputPipe = Pipe()
     private var consoleLogBuffer: [String] = []
     private let maxLogBufferLines: Int = 500
+
+    public weak var vsockRouter: VsockRouter?
+    public weak var balloonController: MemoryBalloonController?
 
     public var onStateChanged: ((VMState) -> Void)?
 
@@ -163,6 +167,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
             let natAttachment = VZNATNetworkDeviceAttachment()
             let netConfig = VZVirtioNetworkDeviceConfiguration()
             netConfig.attachment = natAttachment
+            netConfig.macAddress = VZMACAddress.randomLocallyAdministered()
             config.networkDevices = [netConfig]
 
         case .fileHandle(let handle):
@@ -216,19 +221,21 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
 
         do {
             let config = try buildConfiguration(networkMode: networkMode, validate: validate)
-            let vm = VZVirtualMachine(configuration: config, queue: .main)
+            let vm = VZVirtualMachine(configuration: config, queue: vmQueue)
             vm.delegate = self
             self.virtualMachine = vm
 
             setupConsoleReader()
 
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                vm.start { result in
-                    switch result {
-                    case .success:
-                        continuation.resume()
-                    case .failure(let error):
-                        continuation.resume(throwing: error)
+                vmQueue.async {
+                    vm.start { result in
+                        switch result {
+                        case .success:
+                            continuation.resume()
+                        case .failure(let error):
+                            continuation.resume(throwing: error)
+                        }
                     }
                 }
             }
@@ -237,6 +244,15 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
                 self.startedAt = Date()
                 self.ipAddress = "192.168.138.2"
                 updateState(.running)
+            }
+
+            if let vsock = self.vsockDevice, let router = self.vsockRouter {
+                router.attach(device: vsock, queue: self.vmQueue)
+                print("[ENGINE] VsockRouter successfully attached to guest socket device.")
+            }
+            if let balloon = self.balloonDevice, let bc = self.balloonController {
+                bc.attach(device: balloon, queue: self.vmQueue)
+                print("[ENGINE] MemoryBalloonController attached to guest balloon device.")
             }
         } catch {
             stateLock.withLock {
@@ -262,11 +278,13 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
         }
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            vm.stop { error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
+            vmQueue.async {
+                vm.stop { error in
+                    if let error = error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
                 }
             }
         }
@@ -280,19 +298,30 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
 
     public func requestStop() async throws {
         guard let vm = virtualMachine else { return }
-        try vm.requestStop()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            vmQueue.async {
+                do {
+                    try vm.requestStop()
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
     }
 
     public func pause() async throws {
         guard let vm = virtualMachine, state == .running else { return }
         stateLock.withLock { updateState(.pausing) }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            vm.pause { result in
-                switch result {
-                case .success:
-                    continuation.resume()
-                case .failure(let error):
-                    continuation.resume(throwing: error)
+            vmQueue.async {
+                vm.pause { result in
+                    switch result {
+                    case .success:
+                        continuation.resume()
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
                 }
             }
         }
@@ -302,17 +331,21 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
     public func resume() async throws {
         guard let vm = virtualMachine, state == .paused else { return }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            vm.resume { result in
-                switch result {
-                case .success:
-                    continuation.resume()
-                case .failure(let error):
-                    continuation.resume(throwing: error)
+            vmQueue.async {
+                vm.resume { result in
+                    switch result {
+                    case .success:
+                        continuation.resume()
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
                 }
             }
         }
         stateLock.withLock { updateState(.running) }
     }
+
+
 
     // MARK: - Device Accessors
 
@@ -382,6 +415,12 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
             if data.isEmpty { return }
             if let text = String(data: data, encoding: .utf8) {
                 let lines = text.split(separator: "\n").map(String.init)
+                for line in lines {
+                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        print("[GUEST] \(trimmed)")
+                    }
+                }
                 self.stateLock.withLock {
                     self.consoleLogBuffer.append(contentsOf: lines)
                     if self.consoleLogBuffer.count > self.maxLogBufferLines {
