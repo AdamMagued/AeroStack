@@ -297,6 +297,37 @@ public final class RPCServer: @unchecked Sendable {
             stateLock.unlock()
             return RPCResponse(id: request.id, result: .bool(true))
 
+        case "vm.clone":
+            var source = ""
+            var destination = ""
+            if let pSrc = request.params?["source"], case .string(let s) = pSrc {
+                source = s
+            }
+            if let pDst = request.params?["destination"], case .string(let d) = pDst {
+                destination = d
+            }
+            stateLock.lock()
+            if let srcVM = vms[source] {
+                let clonedVM = VMSummary(
+                    name: destination,
+                    distro: srcVM.distro,
+                    version: srcVM.version,
+                    arch: srcVM.arch,
+                    state: "STOPPED",
+                    cpus: srcVM.cpus,
+                    memory_mb: srcVM.memory_mb,
+                    ip_address: "-",
+                    size: srcVM.size,
+                    uptime_sec: 0
+                )
+                vms[destination] = clonedVM
+                stateLock.unlock()
+                return RPCResponse(id: request.id, result: .bool(true))
+            } else {
+                stateLock.unlock()
+                return RPCResponse(id: request.id, error: RPCError(code: -1, message: "Source machine not found"))
+            }
+
         case "vm.status":
             stateLock.lock()
             let summary = vmManager?.summary ?? vms.values.first ?? VMSummary(
@@ -319,6 +350,45 @@ public final class RPCServer: @unchecked Sendable {
                 return RPCResponse(id: request.id, result: codableVal)
             }
             return RPCResponse(id: request.id, error: RPCError.internalError)
+
+        case "container.start":
+            var id = ""
+            if let pId = request.params?["id"], case .string(let s) = pId {
+                id = s
+            }
+            stateLock.lock()
+            if let idx = containers.firstIndex(where: { $0.id == id || $0.displayName == id }) {
+                containers[idx].state = "running"
+                containers[idx].status = "Up Just now"
+            }
+            stateLock.unlock()
+            return RPCResponse(id: request.id, result: .bool(true))
+
+        case "container.stop":
+            var id = ""
+            if let pId = request.params?["id"], case .string(let s) = pId {
+                id = s
+            }
+            stateLock.lock()
+            if let idx = containers.firstIndex(where: { $0.id == id || $0.displayName == id }) {
+                containers[idx].state = "exited"
+                containers[idx].status = "Exited (0) Just now"
+            }
+            stateLock.unlock()
+            return RPCResponse(id: request.id, result: .bool(true))
+
+        case "container.restart":
+            var id = ""
+            if let pId = request.params?["id"], case .string(let s) = pId {
+                id = s
+            }
+            stateLock.lock()
+            if let idx = containers.firstIndex(where: { $0.id == id || $0.displayName == id }) {
+                containers[idx].state = "running"
+                containers[idx].status = "Up 1 second"
+            }
+            stateLock.unlock()
+            return RPCResponse(id: request.id, result: .bool(true))
 
         case "metrics.get":
             let footprint = MemoryBalloonController.queryHostFootprint()

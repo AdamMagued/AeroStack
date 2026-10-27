@@ -4,7 +4,7 @@ import AppKit
 @main
 struct OrbStackFreeApp: App {
     var body: some Scene {
-        WindowGroup("OrbStack Free", id: "main") {
+        WindowGroup("AeroStack", id: "main") {
             OrbMainView()
         }
         .windowStyle(.titleBar)

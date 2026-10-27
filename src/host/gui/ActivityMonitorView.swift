@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import OrbEngine
 
 public struct ActivityMonitorView: View {
@@ -6,10 +7,10 @@ public struct ActivityMonitorView: View {
 
     public var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: EmilSpacing.lg) {
                 // Header
                 HStack {
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: EmilSpacing.xxs) {
                         Text("Activity & Performance Monitor")
                             .font(.title2)
                             .fontWeight(.bold)
@@ -21,9 +22,11 @@ public struct ActivityMonitorView: View {
 
                     // Low-Memory Badge
                     HStack(spacing: 6) {
-                        Circle()
-                            .fill(store.balloonStats.footprint_mb < 50.0 ? Color.green : Color.orange)
-                            .frame(width: 8, height: 8)
+                        GlowingStatusDot(
+                            color: store.balloonStats.footprint_mb < 50.0 ? .green : .orange,
+                            isPulsing: true,
+                            size: 7
+                        )
                         Text(String(format: "Host RSS: %.1f MB", store.balloonStats.footprint_mb > 0 ? store.balloonStats.footprint_mb : 38.5))
                             .font(.system(.caption, design: .monospaced))
                             .fontWeight(.semibold)
@@ -31,16 +34,21 @@ public struct ActivityMonitorView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .background(Color.green.opacity(0.12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.green.opacity(0.25), lineWidth: 1)
+                    )
                     .cornerRadius(8)
                 }
 
                 Divider()
+                    .overlay(Color.primary.opacity(0.06))
 
                 // 1. CPU Gauges Section
                 Text("CPU Utilization")
                     .font(.headline)
 
-                HStack(spacing: 16) {
+                HStack(spacing: EmilSpacing.md) {
                     GaugeCard(
                         title: "Host CPU Usage",
                         subtitle: "macOS daemon & hypervisor overhead",
@@ -67,8 +75,8 @@ public struct ActivityMonitorView: View {
                     .font(.headline)
                     .padding(.top, 4)
 
-                VStack(spacing: 12) {
-                    HStack(spacing: 16) {
+                VStack(spacing: EmilSpacing.sm) {
+                    HStack(spacing: EmilSpacing.md) {
                         MetricInfoBox(
                             title: "Guest Memory Target",
                             value: "\(store.balloonStats.target_ram_mb > 0 ? store.balloonStats.target_ram_mb : 512) MB",
@@ -92,14 +100,14 @@ public struct ActivityMonitorView: View {
                     }
 
                     // Progress Bar: Allocated vs Freed
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: EmilSpacing.xxs + 2) {
                         HStack {
                             Text("Memory Reclamation Status")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                             Spacer()
                             Text("\(store.metrics.balloon_freed_mb) MB Freed / \(store.metrics.memory_total_mb) MB Max")
-                                .font(.caption)
+                                .font(.system(.caption, design: .monospaced))
                                 .fontWeight(.medium)
                         }
 
@@ -109,9 +117,8 @@ public struct ActivityMonitorView: View {
                         )
                         .tint(.green)
                     }
-                    .padding()
-                    .background(Color.secondary.opacity(0.06))
-                    .cornerRadius(10)
+                    .padding(EmilSpacing.md)
+                    .emilCard()
                 }
 
                 // 3. VirtioFS & Network Section
@@ -119,7 +126,7 @@ public struct ActivityMonitorView: View {
                     .font(.headline)
                     .padding(.top, 4)
 
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: EmilSpacing.md) {
                     MetricInfoBox(
                         title: "VirtioFS Throughput",
                         value: "\(store.metrics.virtiofs_ops_per_sec) ops/sec",
@@ -149,7 +156,7 @@ public struct ActivityMonitorView: View {
                     )
                 }
             }
-            .padding(20)
+            .padding(EmilSpacing.md)
         }
     }
 }
@@ -166,14 +173,14 @@ struct GaugeCard: View {
     let icon: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: EmilSpacing.sm) {
             HStack {
                 Label(title, systemImage: icon)
                     .font(.headline)
                     .foregroundColor(color)
                 Spacer()
                 Text(String(format: "%.1f%@", value, unit))
-                    .font(.title3)
+                    .font(.system(.title3, design: .monospaced))
                     .fontWeight(.bold)
             }
 
@@ -186,9 +193,8 @@ struct GaugeCard: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
-        .padding()
-        .background(Color.secondary.opacity(0.06))
-        .cornerRadius(12)
+        .padding(EmilSpacing.md)
+        .emilCard()
     }
 }
 
@@ -199,7 +205,7 @@ struct MetricInfoBox: View {
     let icon: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: EmilSpacing.xs) {
             HStack {
                 Image(systemName: icon)
                     .foregroundColor(.accentColor)
@@ -210,7 +216,7 @@ struct MetricInfoBox: View {
             }
 
             Text(value)
-                .font(.title3)
+                .font(.system(.title3, design: .monospaced))
                 .fontWeight(.bold)
 
             Text(subtitle)
@@ -218,8 +224,7 @@ struct MetricInfoBox: View {
                 .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(Color.secondary.opacity(0.06))
-        .cornerRadius(10)
+        .padding(EmilSpacing.md)
+        .emilCard()
     }
 }
