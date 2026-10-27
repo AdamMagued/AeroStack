@@ -1,0 +1,70 @@
+# AeroStack .gitignore
+
+# macOS Metadata and AppleDouble Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Build Directories and Artifacts
+.build/
+build/
+bin/
+dist/
+main
+*.o
+*.obj
+*.so
+*.dylib
+*.a
+
+# Go Caches and Dependencies
+.gocache/
+.gopath/
+vendor/
+
+# Swift Package Manager and Xcode Caches
+.swiftpm/
+Packages/
+Package.resolved
+xcuserdata/
+DerivedData/
+
+# Virtual Machine Disk Images and Storage
+*.sparseimage
+*.dmg
+*.qcow2
+*.raw
+*.iso
+*.img
+
+# IPC and Socket Endpoints
+*.sock
+*.socket
+
+# Temporary Benchmark and Test Artifacts
+*.log
+*.tmp
+test_watch/
+test_inotify/
+docker_bridge_bin
+host_io_bench
+guest_io_bench
+guest_inotify_daemon
+guest_inotify_listener
+host_fsevents_bridge
+host_fsevents_bridge_swift
+host_latency_driver
+mach_vm_reclaim_bench
+darwin_mach_vm_dealloc
+granularity_and_fault_bench
+vz_memory_harness
+feedback_loop_simulation
+guest_mem_agent
+test_vmnet
+test_vmnet_network
+test_utun
+test_vz_network
+test_dns_sd
+bench_socketpair_dataplane

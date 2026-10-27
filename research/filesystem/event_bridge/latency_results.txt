@@ -1,0 +1,7 @@
+Total Samples: 8
+Min Latency: 287.58 us (0.2876 ms)
+P50 Latency: 12445.99 us (12.4460 ms)
+P95 Latency: 50554.69 us (50.5547 ms)
+P99 Latency: 50554.69 us (50.5547 ms)
+Max Latency: 50554.69 us (50.5547 ms)
+Mean Latency: 18439.79 us (18.4398 ms)
