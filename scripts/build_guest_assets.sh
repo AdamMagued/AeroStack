@@ -38,7 +38,7 @@ docker run --rm \
 set -euo pipefail
 
 echo "  * Installing Alpine packaging tools and kernel..."
-apk add --no-cache linux-virt e2fsprogs python3 gzip >/dev/null
+apk add --no-cache linux-virt e2fsprogs e2fsprogs-extra python3 gzip >/dev/null
 
 echo "  * Extracting uncompressed ARM64 Linux kernel (vmlinux)..."
 python3 -c '\''
@@ -62,7 +62,7 @@ mkdir -p /tmp/rootfs/etc/apk
 cp -r /etc/apk/keys /etc/apk/repositories /tmp/rootfs/etc/apk/
 
 apk add --root /tmp/rootfs --initdb --no-cache \
-    alpine-base ca-certificates docker containerd runc iptables iproute2 e2fsprogs util-linux procps >/dev/null
+    alpine-base ca-certificates docker containerd runc iptables iproute2 e2fsprogs e2fsprogs-extra util-linux procps >/dev/null
 
 echo "  * Installing and decompressing kernel modules..."
 mkdir -p /tmp/rootfs/lib
@@ -126,6 +126,12 @@ mount -t devpts devpts /dev/pts
 mount -t tmpfs tmpfs /dev/shm
 mount -t tmpfs tmpfs /tmp
 mount -t tmpfs tmpfs /run
+
+# Online resize root filesystem if underlying block device allows
+if [ -b /dev/vda ]; then
+    echo "[AERO-INIT] Resizing root filesystem on /dev/vda..."
+    resize2fs /dev/vda >/dev/kmsg 2>&1 || true
+fi
 
 # Mount cgroups v2
 mkdir -p /sys/fs/cgroup
@@ -219,9 +225,10 @@ EOF_INIT
 chmod 755 /tmp/rootfs/sbin/init
 ln -sf /sbin/init /tmp/rootfs/init
 
-echo "  * Formatting and populating rootfs.ext4 (2GB sparse disk)..."
+echo "  * Formatting and populating rootfs.ext4 (64GB sparse disk)..."
 rm -f /output/rootfs.ext4
-mke2fs -t ext4 -F -L "AERO_ROOT" -d /tmp/rootfs /output/rootfs.ext4 2G >/dev/null
+truncate -s 64G /output/rootfs.ext4
+mke2fs -t ext4 -F -L "AERO_ROOT" -d /tmp/rootfs /output/rootfs.ext4 64G >/dev/null
 
 echo "  * Asset compilation completed successfully inside container."
 '
