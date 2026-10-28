@@ -83,7 +83,7 @@ public struct RPCError: Codable, Error {
 
 // MARK: - Type-erased JSON Value
 
-public enum AnyCodableValue: Codable, Equatable {
+public enum AnyCodableValue: Codable, Equatable, Sendable {
     case string(String)
     case int(Int)
     case double(Double)
@@ -141,6 +141,7 @@ public struct VMSummary: Identifiable, Codable, Hashable {
     public var ip_address: String
     public var size: String
     public var uptime_sec: Int64
+    public var created_at: String?
 
     public init(
         name: String,
@@ -152,7 +153,8 @@ public struct VMSummary: Identifiable, Codable, Hashable {
         memory_mb: Int,
         ip_address: String,
         size: String,
-        uptime_sec: Int64
+        uptime_sec: Int64,
+        created_at: String? = nil
     ) {
         self.name = name
         self.distro = distro
@@ -164,10 +166,33 @@ public struct VMSummary: Identifiable, Codable, Hashable {
         self.ip_address = ip_address
         self.size = size
         self.uptime_sec = uptime_sec
+        self.created_at = created_at
     }
 
     public var isRunning: Bool {
         state == "RUNNING"
+    }
+}
+
+public struct DoctorCheckItem: Codable, Equatable {
+    public var name: String
+    public var ok: Bool
+    public var detail: String
+
+    public init(name: String, ok: Bool, detail: String) {
+        self.name = name
+        self.ok = ok
+        self.detail = detail
+    }
+}
+
+public struct DoctorReport: Codable, Equatable {
+    public var overall_ok: Bool
+    public var checks: [DoctorCheckItem]
+
+    public init(overall_ok: Bool, checks: [DoctorCheckItem]) {
+        self.overall_ok = overall_ok
+        self.checks = checks
     }
 }
 

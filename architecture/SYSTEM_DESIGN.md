@@ -117,7 +117,7 @@ VirtioFS provides near-native read/write bandwidth on Apple Silicon NVMe, but Li
 When a developer runs `docker run -v $(pwd):/app ...`:
 1. The host socket proxy inspects the container creation JSON payload (`HostConfig.Binds` and `Mounts`).
 2. Host paths (e.g. `/Users/username/workspace` or `/Volumes/AdamSSD/workspace`) are dynamically mapped to their corresponding VirtioFS guest mounts (e.g. `/mnt/mac/Users/...` or `/workspace`).
-3. The rewritten JSON is forwarded to `dockerd`, providing complete seamlessness with standard macOS directory paths.
+3. The rewritten JSON is forwarded to `dockerd`, maintaining compatibility with standard macOS directory paths.
 
 ### 3.4. Dual-Mode Bi-Directional Networking & Local DNS
 

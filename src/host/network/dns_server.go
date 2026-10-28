@@ -56,6 +56,14 @@ func (s *EmbeddedDNSServer) RegisterRecord(domain string, v4, v6 net.IP, ttl uin
 	s.records[domain] = RecordEntry{IPv4: v4, IPv6: v6, TTL: ttl}
 }
 
+// UnregisterRecord removes a domain record
+func (s *EmbeddedDNSServer) UnregisterRecord(domain string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
+	delete(s.records, domain)
+}
+
 // Lookup queries the local cache for domain
 func (s *EmbeddedDNSServer) Lookup(domain string) (RecordEntry, bool) {
 	s.mu.RLock()
@@ -131,8 +139,8 @@ func (s *EmbeddedDNSServer) handleQuery(req []byte, remoteAddr net.Addr) {
 		if resp != nil {
 			_, _ = s.conn.WriteTo(resp, remoteAddr)
 		}
-	} else if strings.HasSuffix(domainKey, ".orb.local") {
-		// Authoritative NXDOMAIN for unmapped .orb.local domains
+	} else if strings.HasSuffix(domainKey, ".orb.local") || strings.HasSuffix(domainKey, ".aerostack.local") {
+		// Authoritative NXDOMAIN for unmapped .orb.local or .aerostack.local domains
 		resp := s.buildNXDomainResponse(id, req[12:])
 		if resp != nil {
 			_, _ = s.conn.WriteTo(resp, remoteAddr)

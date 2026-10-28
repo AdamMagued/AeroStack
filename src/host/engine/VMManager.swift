@@ -1,5 +1,5 @@
 import Foundation
-import Virtualization
+@preconcurrency import Virtualization
 import Darwin
 
 public enum VMState: String, Codable {
@@ -159,6 +159,23 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
                 fsDevices.append(fsConfig)
             }
         }
+
+        #if arch(arm64)
+        if #available(macOS 13.0, *) {
+            if VZLinuxRosettaDirectoryShare.availability == .installed {
+                do {
+                    let rosettaShare = try VZLinuxRosettaDirectoryShare()
+                    let rosettaFsConfig = VZVirtioFileSystemDeviceConfiguration(tag: "rosetta")
+                    rosettaFsConfig.share = rosettaShare
+                    fsDevices.append(rosettaFsConfig)
+                    print("[ENGINE] Apple Silicon Rosetta 2 Linux directory share attached (tag: 'rosetta').")
+                } catch {
+                    print("[ENGINE] Warning: Failed to attach Rosetta 2 directory share: \(error)")
+                }
+            }
+        }
+        #endif
+
         config.directorySharingDevices = fsDevices
 
         // 5. Network Devices
@@ -227,9 +244,10 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
 
             setupConsoleReader()
 
+            nonisolated(unsafe) let targetVM = vm
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 vmQueue.async {
-                    vm.start { result in
+                    targetVM.start { result in
                         switch result {
                         case .success:
                             continuation.resume()
@@ -277,9 +295,10 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
             return
         }
 
+        nonisolated(unsafe) let targetVM = vm
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             vmQueue.async {
-                vm.stop { error in
+                targetVM.stop { error in
                     if let error = error {
                         continuation.resume(throwing: error)
                     } else {
@@ -298,10 +317,11 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
 
     public func requestStop() async throws {
         guard let vm = virtualMachine else { return }
+        nonisolated(unsafe) let targetVM = vm
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             vmQueue.async {
                 do {
-                    try vm.requestStop()
+                    try targetVM.requestStop()
                     continuation.resume()
                 } catch {
                     continuation.resume(throwing: error)
@@ -313,9 +333,10 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
     public func pause() async throws {
         guard let vm = virtualMachine, state == .running else { return }
         stateLock.withLock { updateState(.pausing) }
+        nonisolated(unsafe) let targetVM = vm
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             vmQueue.async {
-                vm.pause { result in
+                targetVM.pause { result in
                     switch result {
                     case .success:
                         continuation.resume()
@@ -330,9 +351,10 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
 
     public func resume() async throws {
         guard let vm = virtualMachine, state == .paused else { return }
+        nonisolated(unsafe) let targetVM = vm
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             vmQueue.async {
-                vm.resume { result in
+                targetVM.resume { result in
                     switch result {
                     case .success:
                         continuation.resume()

@@ -160,6 +160,20 @@ mkdir -p /workspace /mnt/mac
 mount -t virtiofs orb_fs /workspace 2>/dev/null || mount -t virtiofs orb_fs /mnt/mac 2>/dev/null || true
 echo "[AERO-INIT] VirtioFS workspace mounted at /workspace."
 
+# Apple Silicon Rosetta 2 Linux Binary Translation
+mkdir -p /run/rosetta /media/rosetta /proc/sys/fs/binfmt_misc
+if mount -t virtiofs rosetta /run/rosetta 2>/dev/null || mount -t virtiofs rosetta /media/rosetta 2>/dev/null; then
+    mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
+    ROSETTA_BIN="/run/rosetta/rosetta"
+    if [ ! -f "${ROSETTA_BIN}" ] && [ -f "/media/rosetta/rosetta" ]; then
+        ROSETTA_BIN="/media/rosetta/rosetta"
+    fi
+    if [ -f "${ROSETTA_BIN}" ] && [ -w /proc/sys/fs/binfmt_misc/register ]; then
+        echo ":rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:${ROSETTA_BIN}:CF" > /proc/sys/fs/binfmt_misc/register 2>/dev/null || true
+        echo "[AERO-INIT] Apple Silicon Rosetta 2 binfmt_misc registered for x86_64 Linux translation."
+    fi
+fi
+
 # Start containerd
 mkdir -p /var/run /var/log /var/lib/docker
 containerd --config /etc/containerd/config.toml >/dev/kmsg 2>&1 &

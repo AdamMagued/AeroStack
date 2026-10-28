@@ -3,7 +3,6 @@
 package main
 
 /*
-#cgo LDFLAGS: -lSystem
 #include <dns_sd.h>
 #include <arpa/inet.h>
 #include <stdlib.h>

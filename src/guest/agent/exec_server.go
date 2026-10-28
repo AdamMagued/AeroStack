@@ -175,22 +175,48 @@ func (s *ExecServer) handleConn(conn net.Conn) {
 		return
 	}
 
+	// Support isolated execution per machine name
+	targetRootfs := ""
+	if req.Machine != "" && req.Machine != "default" {
+		candidates := []string{
+			fmt.Sprintf("/var/machines/%s", req.Machine),
+			fmt.Sprintf("/run/machines/%s", req.Machine),
+			fmt.Sprintf("/workspace/orbstack_free/aerostack_runtime/data/machines/%s/rootfs", req.Machine),
+			fmt.Sprintf("/mnt/mac/aerostack_runtime/data/machines/%s/rootfs", req.Machine),
+		}
+		for _, cand := range candidates {
+			if st, err := os.Stat(cand); err == nil && st.IsDir() {
+				targetRootfs = cand
+				break
+			}
+		}
+	}
+
 	// 2. Prepare command
 	var cmd *exec.Cmd
+	var rawCmd []string
 	if len(req.Command) == 0 {
 		shell := "/bin/sh"
 		if _, err := os.Stat("/bin/bash"); err == nil {
 			shell = "/bin/bash"
 		}
-		cmd = exec.Command(shell)
+		rawCmd = []string{shell}
 	} else if len(req.Command) == 1 {
 		shell := "/bin/sh"
 		if _, err := os.Stat("/bin/bash"); err == nil {
 			shell = "/bin/bash"
 		}
-		cmd = exec.Command(shell, "-c", req.Command[0])
+		rawCmd = []string{shell, "-c", req.Command[0]}
 	} else {
-		cmd = exec.Command(req.Command[0], req.Command[1:]...)
+		rawCmd = req.Command
+	}
+
+	if targetRootfs != "" {
+		// Execute inside machine's isolated rootfs namespace
+		chrootArgs := append([]string{targetRootfs}, rawCmd...)
+		cmd = exec.Command("chroot", chrootArgs...)
+	} else {
+		cmd = exec.Command(rawCmd[0], rawCmd[1:]...)
 	}
 
 	// Set workdir
@@ -204,6 +230,9 @@ func (s *ExecServer) handleConn(conn net.Conn) {
 	cmd.Env = os.Environ()
 	for k, v := range req.Env {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+	}
+	if req.Machine != "" {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("AERO_MACHINE=%s", req.Machine))
 	}
 	cmd.Env = append(cmd.Env, "TERM=xterm-256color")
 
@@ -310,9 +339,9 @@ func (s *ExecServer) handleConn(conn net.Conn) {
 		}
 	}()
 
-	// Wait for process completion
-	_ = cmd.Wait()
+	// Wait for stdout and stderr to finish streaming before waiting for process completion
 	wg.Wait()
+	_ = cmd.Wait()
 
 	exitCode := 0
 	if cmd.ProcessState != nil {

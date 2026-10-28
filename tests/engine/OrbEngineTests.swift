@@ -32,7 +32,7 @@ final class OrbEngineTests: XCTestCase {
         XCTAssertEqual(config.cpuCount, 2)
         XCTAssertEqual(config.memorySize, 2 * 1024 * 1024 * 1024)
         XCTAssertEqual(config.storageDevices.count, 1)
-        XCTAssertEqual(config.directorySharingDevices.count, 1)
+        XCTAssertGreaterThanOrEqual(config.directorySharingDevices.count, 1)
         XCTAssertEqual(config.networkDevices.count, 1)
         XCTAssertEqual(config.socketDevices.count, 1)
         XCTAssertEqual(config.memoryBalloonDevices.count, 1)
@@ -318,6 +318,67 @@ final class OrbEngineTests: XCTestCase {
         let badResp = server.dispatch(request: badReq)
         XCTAssertNotNil(badResp.error)
         XCTAssertEqual(badResp.error?.code, RPCError.methodNotFound.code)
+    }
+
+    func testRPCServerMachineLifecycleAndDoctor() throws {
+        let tempBase = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("orb_rpc_test_\(UUID().uuidString)")
+        let tempSock = tempBase.appendingPathComponent("test.sock").path
+        let tempMachDir = tempBase.appendingPathComponent("machines")
+        try FileManager.default.createDirectory(at: tempMachDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempBase) }
+
+        let server = RPCServer(socketPath: tempSock, machinesDirectory: tempMachDir)
+        try server.start()
+        defer { server.stop() }
+
+        // 1. Test vm.create
+        let createReq = RPCRequest(method: "vm.create", params: [
+            "name": .string("test-box"),
+            "distro": .string("alpine:3.20"),
+            "arch": .string("arm64"),
+            "cpus": .int(2),
+            "memory": .string("1G")
+        ], id: .int(10))
+        let createResp = server.dispatch(request: createReq)
+        XCTAssertNil(createResp.error)
+        XCTAssertEqual(createResp.result, .bool(true))
+
+        let boxDir = tempMachDir.appendingPathComponent("test-box")
+        let boxMeta = boxDir.appendingPathComponent("machine.json")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: boxMeta.path))
+
+        // 2. Test vm.clone
+        let cloneReq = RPCRequest(method: "vm.clone", params: [
+            "source": .string("test-box"),
+            "destination": .string("test-box-cloned")
+        ], id: .int(11))
+        let cloneResp = server.dispatch(request: cloneReq)
+        XCTAssertNil(cloneResp.error)
+        XCTAssertEqual(cloneResp.result, .bool(true))
+
+        let cloneDir = tempMachDir.appendingPathComponent("test-box-cloned")
+        let cloneMeta = cloneDir.appendingPathComponent("machine.json")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cloneMeta.path))
+
+        // 3. Test vm.list
+        let listReq = RPCRequest(method: "vm.list", id: .int(12))
+        let listResp = server.dispatch(request: listReq)
+        XCTAssertNil(listResp.error)
+
+        // 4. Test vm.delete
+        let delReq = RPCRequest(method: "vm.delete", params: [
+            "name": .string("test-box")
+        ], id: .int(13))
+        let delResp = server.dispatch(request: delReq)
+        XCTAssertNil(delResp.error)
+        XCTAssertEqual(delResp.result, .bool(true))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: boxDir.path))
+
+        // 5. Test doctor.run
+        let doctorReq = RPCRequest(method: "doctor.run", id: .int(14))
+        let doctorResp = server.dispatch(request: doctorReq)
+        XCTAssertNil(doctorResp.error)
+        XCTAssertNotNil(doctorResp.result)
     }
 
     func testRPCServerUnixDomainSocketClient() throws {

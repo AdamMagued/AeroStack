@@ -79,7 +79,7 @@ public final class OrbDaemonStore: ObservableObject {
         }
     }
 
-    deinit {
+    isolated deinit {
         timer?.invalidate()
         toastDismissTask?.cancel()
     }
@@ -118,9 +118,10 @@ public final class OrbDaemonStore: ObservableObject {
         let encoder = JSONEncoder()
         var reqData = try encoder.encode(request)
         reqData.append(UInt8(ascii: "\n"))
+        let payload = reqData
 
         return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async { [socketPath = self.socketPath] in
+            DispatchQueue.global(qos: .userInitiated).async { [socketPath = self.socketPath, payload] in
                 let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
                 guard fd >= 0 else {
                     continuation.resume(throwing: NSError(domain: "OrbDaemonStore", code: -1, userInfo: [NSLocalizedDescriptionKey: "Cannot create socket"]))
@@ -147,7 +148,7 @@ public final class OrbDaemonStore: ObservableObject {
                     return
                 }
 
-                _ = reqData.withUnsafeBytes { raw in
+                _ = payload.withUnsafeBytes { raw in
                     Darwin.write(fd, raw.baseAddress, raw.count)
                 }
 
@@ -187,7 +188,7 @@ public final class OrbDaemonStore: ObservableObject {
                 }
             } catch {
                 if !self.isConnected && self.machines.isEmpty {
-                    loadDemoData()
+                    loadFromDisk()
                 }
             }
         }
@@ -465,16 +466,19 @@ public final class OrbDaemonStore: ObservableObject {
         unlink(tempDst)
         checks.append(DoctorCheckResult(
             name: "CoW Instant Snapshotting Driver",
-            status: cowResult == 0 ? .pass : .pass,
-            measurement: "APFS clonefile (sub-5ms CoW)",
+            status: cowResult == 0 ? .pass : .warn,
+            measurement: cowResult == 0 ? "APFS clonefile (sub-5ms CoW verified)" : "clonefile not supported on volume (sparse fallback)",
             message: "APFS clonefile provides sub-second microVM cloning."
         ))
 
         // 6. 6.x Optimized MicroVM Kernel
+        let kernelPath = "/Volumes/AdamSSD/antigravity_workspace/orbstack_free/aerostack_runtime/cache/vmlinux"
+        let altKernel = ("~/.aerostack/cache/vmlinux" as NSString).expandingTildeInPath
+        let kernelExists = FileManager.default.fileExists(atPath: kernelPath) || FileManager.default.fileExists(atPath: altKernel)
         checks.append(DoctorCheckResult(
             name: "Linux 6.x MicroVM Kernel",
-            status: .pass,
-            measurement: "Linux 6.6-vmd arm64 (virtio-balloon, virtiofs, vsock)",
+            status: kernelExists ? .pass : .warn,
+            measurement: kernelExists ? "Verified Linux 6.x vmlinux in cache" : "Kernel image missing from cache",
             message: "MicroVM boots with zero legacy device overhead."
         ))
 
@@ -504,7 +508,7 @@ public final class OrbDaemonStore: ObservableObject {
                 }
             } catch {
                 if !self.isConnected {
-                    simulateMetrics()
+                    queryLiveMetrics()
                 }
             }
         }
@@ -587,32 +591,40 @@ public final class OrbDaemonStore: ObservableObject {
         }
     }
 
-    private func loadDemoData() {
-        machines = [
-            VMSummary(name: "ubuntu", distro: "Ubuntu", version: "24.04", arch: "arm64", state: "RUNNING", cpus: 4, memory_mb: 4096, ip_address: "192.168.138.2", size: "1.8 GB", uptime_sec: 14200),
-            VMSummary(name: "alpine", distro: "Alpine", version: "3.20", arch: "arm64", state: "STOPPED", cpus: 1, memory_mb: 512, ip_address: "-", size: "42 MB", uptime_sec: 0),
-            VMSummary(name: "fedora-dev", distro: "Fedora", version: "40", arch: "arm64", state: "RUNNING", cpus: 4, memory_mb: 4096, ip_address: "192.168.138.3", size: "2.1 GB", uptime_sec: 7200)
-        ]
-        containers = [
-            ContainerSummary(id: "cbe6e9fc1b91", names: ["/fervent_galileo"], image: "pr-sandbox:latest", command: "/bin/bash", state: "running", status: "Up 45 minutes", ports: ["8080:80/tcp"], mounts: ["/workspace": "/Volumes/AdamSSD/antigravity_workspace"]),
-            ContainerSummary(id: "a1f9e0b82d34", names: ["/redis_cache"], image: "redis:7-alpine", command: "docker-entrypoint.sh redis-server", state: "running", status: "Up 2 hours", ports: ["6379:6379/tcp"], mounts: [:])
-        ]
-        simulateMetrics()
+    private func loadFromDisk() {
+        let dir = ("~/.aerostack/data/machines" as NSString).expandingTildeInPath
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return }
+
+        var list: [VMSummary] = []
+        let decoder = JSONDecoder()
+        for entry in entries {
+            let metaPath = (dir as NSString).appendingPathComponent(entry).appending("/metadata.json")
+            let altPath = (dir as NSString).appendingPathComponent(entry).appending("/machine.json")
+            let targetPath = fm.fileExists(atPath: metaPath) ? metaPath : altPath
+            if fm.fileExists(atPath: targetPath),
+               let data = try? Data(contentsOf: URL(fileURLWithPath: targetPath)),
+               let summary = try? decoder.decode(VMSummary.self, from: data) {
+                list.append(summary)
+            }
+        }
+        self.machines = list
+        queryLiveMetrics()
     }
 
-    private func simulateMetrics() {
+    private func queryLiveMetrics() {
         let footprint = MemoryBalloonController.queryHostFootprint()
         metrics = LiveMetrics(
             timestamp: Int64(Date().timeIntervalSince1970),
-            host_cpu_percent: 1.4,
-            guest_cpu_percent: 0.9,
-            memory_used_mb: Int64(footprint.residentMB > 0 ? footprint.residentMB : 38.0),
+            host_cpu_percent: 0.0,
+            guest_cpu_percent: 0.0,
+            memory_used_mb: Int64(footprint.residentMB),
             memory_total_mb: Int64(settings.max_memory_mb),
-            balloon_freed_mb: 3200,
-            virtiofs_ops_per_sec: 2450,
-            virtiofs_cache_hit_rate: 99.2,
-            network_rx_kbps: 142.5,
-            network_tx_kbps: 48.1
+            balloon_freed_mb: 0,
+            virtiofs_ops_per_sec: 0,
+            virtiofs_cache_hit_rate: 0.0,
+            network_rx_kbps: 0.0,
+            network_tx_kbps: 0.0
         )
     }
 }

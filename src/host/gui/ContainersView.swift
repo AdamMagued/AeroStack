@@ -13,7 +13,7 @@ public struct ContainersView: View {
                     Text("Docker Containers")
                         .font(.title2)
                         .fontWeight(.bold)
-                    Text("\(store.containers.filter { $0.state == "running" }.count) running • VirtioFS Accelerated • Sub-millisecond IPC")
+                    Text("\(store.containers.filter { $0.state == "running" }.count) running | VirtioFS Accelerated | Sub-millisecond IPC")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -258,7 +258,7 @@ struct ClickableMountBadge: View {
                     .lineLimit(1)
                     .foregroundColor(.primary)
 
-                Text("➔")
+                Text("->")
                     .font(.caption2)
                     .foregroundColor(.secondary)
 

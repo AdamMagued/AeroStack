@@ -1,5 +1,5 @@
 import Foundation
-import Virtualization
+@preconcurrency import Virtualization
 import Darwin
 
 public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unchecked Sendable {
@@ -131,11 +131,12 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
         let queue = self.vmQueue ?? DispatchQueue.main
 
         var lastError: Error?
+        nonisolated(unsafe) let targetDev = device
         for attempt in 1...max(1, retries) {
             do {
                 return try await withCheckedThrowingContinuation { continuation in
                     queue.async {
-                        device.connect(toPort: port) { result in
+                        targetDev.connect(toPort: port) { result in
                             switch result {
                             case .success(let connection):
                                 continuation.resume(returning: connection)

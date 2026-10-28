@@ -7,6 +7,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -49,18 +51,40 @@ func main() {
 
 	// 2. Initialize Embedded DNS Server
 	dnsServer := NewEmbeddedDNSServer(*upstreamDNS)
-	// Register default gateway and host domains
+	// Register default gateway and host domains (.orb.local and .aerostack.local)
 	dnsServer.RegisterRecord("host.orb.local", parsedRouterIP, net.ParseIP("fd00:1234:5678::1"), 60)
+	dnsServer.RegisterRecord("host.aerostack.local", parsedRouterIP, net.ParseIP("fd00:1234:5678::1"), 60)
 	dnsServer.RegisterRecord("orb.local", parsedRouterIP, net.ParseIP("fd00:1234:5678::1"), 60)
+	dnsServer.RegisterRecord("aerostack.local", parsedRouterIP, net.ParseIP("fd00:1234:5678::1"), 60)
+
+	// Discover local machines and register their DNS records
+	home, _ := os.UserHomeDir()
+	machinesDir := filepath.Join(home, ".aerostack", "data", "machines")
+	if entries, err := os.ReadDir(machinesDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				mName := strings.ToLower(entry.Name())
+				machIP := net.ParseIP("192.168.128.2")
+				dnsServer.RegisterRecord(mName+".orb.local", machIP, nil, 60)
+				dnsServer.RegisterRecord(mName+".aerostack.local", machIP, nil, 60)
+				log.Printf("[orb-netd:dns] Registered machine DNS: %s.orb.local / %s.aerostack.local -> %s", mName, mName, machIP)
+			}
+		}
+	}
 
 	if err := dnsServer.Start(*dnsBind); err != nil {
 		log.Printf("[orb-netd:warn] Failed to bind DNS to %s: %v (falling back to unprivileged port)", *dnsBind, err)
 		_ = dnsServer.Start("127.0.0.1:0")
 	} else {
-		log.Printf("[orb-netd:dns] RFC 1035 DNS server active on %s (handling *.orb.local)", *dnsBind)
+		log.Printf("[orb-netd:dns] RFC 1035 DNS server active on %s (handling *.orb.local and *.aerostack.local)", *dnsBind)
 	}
 
-	// 3. Initialize Bonjour mDNS Advertiser
+	// 3. Initialize Userspace Port Forwarder
+	portForwarder := NewPortForwarder()
+	portForwarder.Start()
+	log.Printf("[orb-netd:forward] Userspace dynamic port forwarding active")
+
+	// 4. Initialize Bonjour mDNS Advertiser
 	var mdns *MDNSAdvertiser
 	if *enableMDNS {
 		var err error
@@ -79,6 +103,8 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-sigCh
 	log.Printf("[orb-netd] Received signal %v, terminating engine...", sig)
+
+	portForwarder.Stop()
 
 	if mdns != nil {
 		mdns.Close()

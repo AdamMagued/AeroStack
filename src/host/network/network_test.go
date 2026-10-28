@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -258,5 +259,93 @@ func TestMDNSAdvertiser(t *testing.T) {
 	err = adv.RegisterHostname("testcontainer.local", net.ParseIP("192.168.128.20"), nil)
 	if err != nil {
 		t.Fatalf("RegisterHostname failed: %v", err)
+	}
+}
+
+func TestPortForwarder_TCP(t *testing.T) {
+	// 1. Mock backend server (simulating container)
+	backendListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to listen backend: %v", err)
+	}
+	defer backendListener.Close()
+
+	backendPort := backendListener.Addr().(*net.TCPAddr).Port
+
+	go func() {
+		conn, err := backendListener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		buf := make([]byte, 1024)
+		n, _ := conn.Read(buf)
+		if n > 0 {
+			_, _ = conn.Write(append([]byte("ECHO:"), buf[:n]...))
+		}
+	}()
+
+	// 2. Port Forwarder
+	pf := NewPortForwarder()
+	pf.Start()
+	defer pf.Stop()
+
+	// Find free host port
+	freeL, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to find free port: %v", err)
+	}
+	hostPort := freeL.Addr().(*net.TCPAddr).Port
+	freeL.Close()
+
+	if err := pf.ForwardTCP("127.0.0.1", hostPort, "127.0.0.1", backendPort); err != nil {
+		t.Fatalf("ForwardTCP failed: %v", err)
+	}
+
+	// 3. Connect client to hostPort
+	clientConn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", hostPort), 2*time.Second)
+	if err != nil {
+		t.Fatalf("Client dial failed: %v", err)
+	}
+	defer clientConn.Close()
+
+	msg := "aerostack_stream_test"
+	if _, err := clientConn.Write([]byte(msg)); err != nil {
+		t.Fatalf("Client write failed: %v", err)
+	}
+
+	resp := make([]byte, 1024)
+	n, err := clientConn.Read(resp)
+	if err != nil {
+		t.Fatalf("Client read failed: %v", err)
+	}
+	expected := "ECHO:" + msg
+	if string(resp[:n]) != expected {
+		t.Fatalf("Mismatch: expected %q, got %q", expected, string(resp[:n]))
+	}
+
+	// 4. Test RemoveForward
+	if err := pf.RemoveForward("tcp", "127.0.0.1", hostPort); err != nil {
+		t.Fatalf("RemoveForward failed: %v", err)
+	}
+}
+
+func TestDNSServer_AerostackLocal(t *testing.T) {
+	dns := NewEmbeddedDNSServer("1.1.1.1:53")
+	dns.RegisterRecord("testbox.aerostack.local", net.ParseIP("192.168.128.77"), nil, 60)
+
+	rec, ok := dns.Lookup("testbox.aerostack.local")
+	if !ok {
+		t.Fatalf("Expected testbox.aerostack.local to resolve")
+	}
+	if rec.IPv4.String() != "192.168.128.77" {
+		t.Fatalf("Expected IP 192.168.128.77, got %s", rec.IPv4.String())
+	}
+
+	dns.UnregisterRecord("testbox.aerostack.local")
+	_, ok = dns.Lookup("testbox.aerostack.local")
+	if ok {
+		t.Fatalf("Expected record to be removed after UnregisterRecord")
 	}
 }

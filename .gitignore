@@ -42,6 +42,7 @@ DerivedData/
 vmlinux
 initramfs*
 aerostack_runtime/
+data/
 
 # IPC and Socket Endpoints
 *.sock

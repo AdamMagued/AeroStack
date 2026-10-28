@@ -68,7 +68,7 @@ public final class HostBalloonController {
                 
                 if newTargetMB > currentTargetMB {
                     self.balloonDevice.targetVirtualMachineMemorySize = newTargetMB * 1024 * 1024
-                    print("[CONTROLLER] ⚡ BURST: Stalled (\(psiSome)%). Target -> \(newTargetMB) MB")
+                    print("[CONTROLLER] [BURST] Stalled (\(psiSome)%). Target -> \(newTargetMB) MB")
                 }
                 return
             }
@@ -79,7 +79,7 @@ public final class HostBalloonController {
                 if self.idleTicks >= self.idleHoldThresholdTicks {
                     if !self.compactionRequested {
                         self.compactionRequested = true
-                        print("[CONTROLLER] 🧹 GUEST IDLE: Requesting compaction & cache flush")
+                        print("[CONTROLLER] [GUEST_IDLE] Requesting compaction & cache flush")
                         // Send HostControlFrame with flags = 0x3 (compact + drop caches)
                     } else {
                         let reclaimableMB = availMB - self.targetIdleReserveMB
@@ -88,7 +88,7 @@ public final class HostBalloonController {
                         
                         if newTargetMB < currentTargetMB {
                             self.balloonDevice.targetVirtualMachineMemorySize = newTargetMB * 1024 * 1024
-                            print("[CONTROLLER] 📉 RECLAIM: Reclaiming \(stepMB) MB -> New Target: \(newTargetMB) MB")
+                            print("[CONTROLLER] [RECLAIM] Reclaiming \(stepMB) MB -> New Target: \(newTargetMB) MB")
                         }
                     }
                 }

@@ -24,7 +24,7 @@ public struct MachinesView: View {
                     Text("Linux MicroVMs")
                         .font(.title2)
                         .fontWeight(.bold)
-                    Text("\(store.machines.filter(\.isRunning).count) running • \(store.machines.count) total machines • Sub-second boot")
+                    Text("\(store.machines.filter(\.isRunning).count) running | \(store.machines.count) total machines | Sub-second boot")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -142,7 +142,7 @@ struct MachineCardView: View {
                     DistroBadgeView(distro: machine.distro)
                 }
 
-                Text("\(machine.version) • \(machine.arch) • \(machine.cpus) vCPUs • \(machine.memory_mb) MB RAM • \(machine.size)")
+                Text("\(machine.version) | \(machine.arch) | \(machine.cpus) vCPUs | \(machine.memory_mb) MB RAM | \(machine.size)")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

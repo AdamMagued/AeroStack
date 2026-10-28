@@ -9,7 +9,7 @@ struct OrbVMDMain {
         setlinebuf(stderr)
         print("""
         ======================================================================
-           ⚡ AeroStack / OrbStack Free - Production Host Engine Daemon (orb-vmd)
+           AeroStack / OrbStack Free - Production Host Engine Daemon (orb-vmd)
            Hypervisor: macOS Virtualization.framework (Darwin 23+ / Apple Silicon)
            Target: Low-tens MB Footprint | Zero Host Polling | VirtioFS Bridge
         ======================================================================

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -127,7 +128,9 @@ func (p *DockerProxy) acceptLoop(l net.Listener) {
 			case <-p.ctx.Done():
 				return
 			default:
-				time.Sleep(10 * time.Millisecond)
+				if errors.Is(err, net.ErrClosed) || strings.Contains(err.Error(), "use of closed network connection") {
+					return
+				}
 				continue
 			}
 		}

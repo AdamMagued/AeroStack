@@ -135,7 +135,7 @@ The empirical measurements above were validated through adversarial analysis to 
    - **Warm Boot**: Measures subsequent startup with host page cache populated, reflecting everyday local workflow restarts.
 
 3. **VirtioFS Buffered vs. Direct I/O Accounting**:
-   - **Buffered I/O**: Operations leverage the macOS APFS unified buffer cache across shared guest physical pages, achieving memory-speed read throughput (> 4,300 MB/s).
+   - **Buffered I/O**: Operations route through the macOS APFS unified buffer cache across shared guest physical pages, achieving memory-speed read throughput (> 4,300 MB/s).
    - **Direct I/O**: Bypasses Darwin host and Linux guest buffer caches using Darwin `fcntl(fd, F_NOCACHE, 1)` and Linux `O_DIRECT` accompanied by synchronous `fsync()` barriers, evaluating true storage controller throughput.
 
 4. **Real-Time FSEvents-to-inotify Latency & Hot Reload**:
