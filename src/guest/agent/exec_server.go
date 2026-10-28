@@ -11,6 +11,9 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"github.com/creack/pty"
 )
 
 // Direct Exec Protocol message types
@@ -236,6 +239,123 @@ func (s *ExecServer) handleConn(conn net.Conn) {
 	}
 	cmd.Env = append(cmd.Env, "TERM=xterm-256color")
 
+	if req.Tty {
+		s.handlePTYExec(conn, cmd, req)
+	} else {
+		s.handlePipeExec(conn, cmd)
+	}
+}
+
+func (s *ExecServer) handlePTYExec(conn net.Conn, cmd *exec.Cmd, req ExecRequest) {
+	rows := req.Rows
+	if rows == 0 {
+		rows = 24
+	}
+	cols := req.Cols
+	if cols == 0 {
+		cols = 80
+	}
+
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
+		Rows: rows,
+		Cols: cols,
+	})
+	if err != nil {
+		s.sendError(conn, err.Error())
+		return
+	}
+	defer func() {
+		_ = ptmx.Close()
+	}()
+
+	atomic.AddUint64(&s.execCount, 1)
+
+	// Send Success Response
+	resp := ExecResponse{
+		Started: true,
+		PID:     cmd.Process.Pid,
+	}
+	respBytes, _ := json.Marshal(resp)
+	respHdr := make([]byte, 5)
+	respHdr[0] = byte(ExecMsgResponse)
+	binary.BigEndian.PutUint32(respHdr[1:], uint32(len(respBytes)))
+	_, _ = conn.Write(respHdr)
+	_, _ = conn.Write(respBytes)
+
+	var wg sync.WaitGroup
+
+	// Stream PTY output -> conn
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 8192)
+		for {
+			n, rerr := ptmx.Read(buf)
+			if n > 0 {
+				frame := make([]byte, 5+n)
+				frame[0] = byte(ExecMsgDataStdout)
+				binary.BigEndian.PutUint32(frame[1:], uint32(n))
+				copy(frame[5:], buf[:n])
+				if _, werr := conn.Write(frame); werr != nil {
+					return
+				}
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+
+	// Read frames from conn (stdin and window resize)
+	go func() {
+		fHdr := make([]byte, 5)
+		for {
+			if _, err := io.ReadFull(conn, fHdr); err != nil {
+				return
+			}
+			mType := ExecMsgType(fHdr[0])
+			pLen := binary.BigEndian.Uint32(fHdr[1:])
+			pBuf := make([]byte, pLen)
+			if _, err := io.ReadFull(conn, pBuf); err != nil {
+				return
+			}
+
+			switch mType {
+			case ExecMsgDataStdin:
+				if _, werr := ptmx.Write(pBuf); werr != nil {
+					return
+				}
+			case ExecMsgWindowResize:
+				var resize WindowResizePayload
+				if err := json.Unmarshal(pBuf, &resize); err == nil && resize.Rows > 0 && resize.Cols > 0 {
+					_ = pty.Setsize(ptmx, &pty.Winsize{
+						Rows: resize.Rows,
+						Cols: resize.Cols,
+					})
+				}
+			}
+		}
+	}()
+
+	// Wait for command termination
+	_ = cmd.Wait()
+	_ = ptmx.Close()
+	wg.Wait()
+
+	exitCode := 0
+	if cmd.ProcessState != nil {
+		exitCode = cmd.ProcessState.ExitCode()
+	}
+
+	// Send ExitStatus frame
+	exitFrame := make([]byte, 9)
+	exitFrame[0] = byte(ExecMsgExitStatus)
+	binary.BigEndian.PutUint32(exitFrame[1:], 4)
+	binary.BigEndian.PutUint32(exitFrame[5:], uint32(exitCode))
+	_, _ = conn.Write(exitFrame)
+}
+
+func (s *ExecServer) handlePipeExec(conn net.Conn, cmd *exec.Cmd) {
 	cmdStdin, err := cmd.StdinPipe()
 	if err != nil {
 		s.sendError(conn, err.Error())
@@ -259,7 +379,7 @@ func (s *ExecServer) handleConn(conn net.Conn) {
 
 	atomic.AddUint64(&s.execCount, 1)
 
-	// 3. Send Success Response
+	// Send Success Response
 	resp := ExecResponse{
 		Started: true,
 		PID:     cmd.Process.Pid,
@@ -271,16 +391,15 @@ func (s *ExecServer) handleConn(conn net.Conn) {
 	_, _ = conn.Write(respHdr)
 	_, _ = conn.Write(respBytes)
 
-	// 4. Concurrent streaming
-	var wg sync.WaitGroup
+	var streamWg sync.WaitGroup
 
 	// Stream stdout -> conn
-	wg.Add(1)
+	streamWg.Add(1)
 	go func() {
-		defer wg.Done()
+		defer streamWg.Done()
 		buf := make([]byte, 8192)
 		for {
-			n, err := cmdStdout.Read(buf)
+			n, rerr := cmdStdout.Read(buf)
 			if n > 0 {
 				frame := make([]byte, 5+n)
 				frame[0] = byte(ExecMsgDataStdout)
@@ -290,19 +409,19 @@ func (s *ExecServer) handleConn(conn net.Conn) {
 					return
 				}
 			}
-			if err != nil {
+			if rerr != nil {
 				return
 			}
 		}
 	}()
 
 	// Stream stderr -> conn
-	wg.Add(1)
+	streamWg.Add(1)
 	go func() {
-		defer wg.Done()
+		defer streamWg.Done()
 		buf := make([]byte, 8192)
 		for {
-			n, err := cmdStderr.Read(buf)
+			n, rerr := cmdStderr.Read(buf)
 			if n > 0 {
 				frame := make([]byte, 5+n)
 				frame[0] = byte(ExecMsgDataStderr)
@@ -312,13 +431,13 @@ func (s *ExecServer) handleConn(conn net.Conn) {
 					return
 				}
 			}
-			if err != nil {
+			if rerr != nil {
 				return
 			}
 		}
 	}()
 
-	// Receive stdin from conn -> process
+	// Read stdin frames from conn
 	go func() {
 		defer cmdStdin.Close()
 		fHdr := make([]byte, 5)
@@ -332,16 +451,41 @@ func (s *ExecServer) handleConn(conn net.Conn) {
 			if _, err := io.ReadFull(conn, pBuf); err != nil {
 				return
 			}
-
 			if mType == ExecMsgDataStdin {
-				_, _ = cmdStdin.Write(pBuf)
+				if _, werr := cmdStdin.Write(pBuf); werr != nil {
+					return
+				}
 			}
 		}
 	}()
 
-	// Wait for stdout and stderr to finish streaming before waiting for process completion
-	wg.Wait()
-	_ = cmd.Wait()
+	// Wait for process completion or pipe drain.
+	// Background child processes can hold stdout/stderr open.
+	// When the spawned parent process exits, wait for pipes to drain or timeout before closing them.
+	pipesDone := make(chan struct{})
+	go func() {
+		streamWg.Wait()
+		close(pipesDone)
+	}()
+
+	cmdDone := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(cmdDone)
+	}()
+
+	select {
+	case <-pipesDone:
+		<-cmdDone
+	case <-cmdDone:
+		select {
+		case <-pipesDone:
+		case <-time.After(50 * time.Millisecond):
+			_ = cmdStdout.Close()
+			_ = cmdStderr.Close()
+			<-pipesDone
+		}
+	}
 
 	exitCode := 0
 	if cmd.ProcessState != nil {

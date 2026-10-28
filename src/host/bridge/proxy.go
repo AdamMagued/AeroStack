@@ -187,37 +187,36 @@ func (p *DockerProxy) handleClient(clientConn net.Conn) {
 			return
 		}
 
-		// Read request body
-		var reqBodyBytes []byte
-		if req.Body != nil {
-			reqBodyBytes, err = io.ReadAll(req.Body)
-			_ = req.Body.Close()
-			if err != nil {
-				return
-			}
-		}
-
 		// Intercept Container Create: rewrite host paths to VirtioFS paths
-		if method == http.MethodPost && (strings.HasSuffix(path, "/containers/create") || path == "/containers/create") {
+		isCreate := method == http.MethodPost && (strings.HasSuffix(path, "/containers/create") || path == "/containers/create")
+		if isCreate {
+			var reqBodyBytes []byte
+			if req.Body != nil {
+				reqBodyBytes, err = io.ReadAll(req.Body)
+				_ = req.Body.Close()
+				if err != nil {
+					return
+				}
+			}
+
 			translated, terr := p.translator.TranslateContainerCreateRequestBody(reqBodyBytes)
 			if terr == nil {
 				reqBodyBytes = translated
+			}
+
+			if len(reqBodyBytes) > 0 {
+				req.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
+				req.ContentLength = int64(len(reqBodyBytes))
 				req.Header.Set("Content-Length", strconv.Itoa(len(reqBodyBytes)))
+			} else {
+				req.Body = nil
+				req.ContentLength = 0
+				req.Header.Del("Content-Length")
+				req.Header.Del("Transfer-Encoding")
 			}
 		}
 
-		if len(reqBodyBytes) > 0 {
-			req.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
-			req.ContentLength = int64(len(reqBodyBytes))
-			req.Header.Set("Content-Length", strconv.Itoa(len(reqBodyBytes)))
-		} else {
-			req.Body = nil
-			req.ContentLength = 0
-			req.Header.Del("Content-Length")
-			req.Header.Del("Transfer-Encoding")
-		}
-
-		// Write modified request to backend
+		// Write request to backend (streams directly for non-create requests)
 		if err := req.Write(backendConn); err != nil {
 			return
 		}
@@ -236,7 +235,17 @@ func (p *DockerProxy) handleClient(clientConn net.Conn) {
 		}
 
 		// Intercept Container Inspect: reverse translate guest paths back to macOS paths
-		isInspect := method == http.MethodGet && (strings.HasSuffix(path, "/json") && strings.Contains(path, "/containers/"))
+		// Accurately match /containers/{id}/json, strictly excluding /containers/json (container list)
+		isInspect := false
+		if method == http.MethodGet && strings.HasSuffix(path, "/json") {
+			trimmed := strings.TrimSuffix(path, "/json")
+			if idx := strings.LastIndex(trimmed, "/containers/"); idx != -1 {
+				cid := trimmed[idx+len("/containers/"):]
+				if cid != "" && cid != "json" {
+					isInspect = true
+				}
+			}
+		}
 		if isInspect && resp.StatusCode == http.StatusOK {
 			respBodyBytes, rerr := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()

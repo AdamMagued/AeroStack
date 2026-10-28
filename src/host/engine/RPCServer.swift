@@ -29,11 +29,32 @@ public final class RPCServer: @unchecked Sendable {
         if FileManager.default.fileExists(atPath: aeroURL.path) {
             return aeroURL
         }
-        let ssdDefault = URL(fileURLWithPath: "/Volumes/AdamSSD/antigravity_workspace/orbstack_free/data/machines")
+        let root = Self.resolveProjectRoot()
+        let ssdDefault = URL(fileURLWithPath: "\(root)/data/machines")
         if FileManager.default.fileExists(atPath: ssdDefault.path) {
             return ssdDefault
         }
         return URL(fileURLWithPath: settings.storage_location).appendingPathComponent("machines")
+    }
+
+    public static func resolveProjectRoot() -> String {
+        if let env = ProcessInfo.processInfo.environment["AEROSTACK_ROOT"], FileManager.default.fileExists(atPath: env) {
+            return env
+        }
+        let execURL = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+        let candidate1 = execURL.deletingLastPathComponent().deletingLastPathComponent()
+        if FileManager.default.fileExists(atPath: candidate1.appendingPathComponent("Package.swift").path) {
+            return candidate1.path
+        }
+        let cwd = FileManager.default.currentDirectoryPath
+        if FileManager.default.fileExists(atPath: (cwd as NSString).appendingPathComponent("Package.swift")) {
+            return cwd
+        }
+        let ssdPath = "/Volumes/AdamSSD/antigravity_workspace/orbstack_free"
+        if FileManager.default.fileExists(atPath: ssdPath) {
+            return ssdPath
+        }
+        return ("~/.aerostack" as NSString).expandingTildeInPath
     }
 
     public init(
@@ -169,10 +190,36 @@ public final class RPCServer: @unchecked Sendable {
 
     private func provisionDiskImage(at targetURL: URL, templateURL: URL?) {
         let fm = FileManager.default
-        if let template = templateURL, fm.fileExists(atPath: template.path) {
+        if let template = templateURL?.resolvingSymlinksInPath(), fm.fileExists(atPath: template.path) {
             let cloneRes = clonefile(template.path, targetURL.path, 0)
             if cloneRes == 0 {
                 return
+            }
+            // Check available disk space on target filesystem before dense cross-volume copy
+            var sfs = statvfs()
+            let targetDir = targetURL.deletingLastPathComponent().path
+            var hasSpace = true
+            if statvfs(targetDir, &sfs) == 0 {
+                let availBytes = UInt64(sfs.f_bavail) * UInt64(sfs.f_frsize)
+                let tFd = Darwin.open(template.path, O_RDONLY)
+                if tFd >= 0 {
+                    var st = Darwin.stat()
+                    if fstat(tFd, &st) == 0 {
+                        let fileSize = UInt64(st.st_size)
+                        if fileSize > 2 * 1024 * 1024 * 1024 || availBytes < fileSize {
+                            hasSpace = false
+                        }
+                    }
+                    Darwin.close(tFd)
+                }
+            }
+            if hasSpace {
+                if copyfile(template.path, targetURL.path, nil, copyfile_flags_t(COPYFILE_ALL)) == 0 {
+                    return
+                }
+                if (try? fm.copyItem(at: template, to: targetURL)) != nil {
+                    return
+                }
             }
         }
         let fd = open(targetURL.path, O_RDWR | O_CREAT | O_TRUNC, 0o644)
@@ -423,7 +470,7 @@ public final class RPCServer: @unchecked Sendable {
                 try fm.createDirectory(at: machDir, withIntermediateDirectories: true)
                 let cacheDir = URL(fileURLWithPath: ("~/.aerostack/cache" as NSString).expandingTildeInPath)
                 let rootfsTemplate = cacheDir.appendingPathComponent("rootfs.ext4")
-                let ssdCache = URL(fileURLWithPath: "/Volumes/AdamSSD/antigravity_workspace/orbstack_free/aerostack_runtime/cache/rootfs.ext4")
+                let ssdCache = URL(fileURLWithPath: "\(Self.resolveProjectRoot())/aerostack_runtime/cache/rootfs.ext4")
                 let templateURL = fm.fileExists(atPath: rootfsTemplate.path) ? rootfsTemplate : (fm.fileExists(atPath: ssdCache.path) ? ssdCache : nil)
                 provisionDiskImage(at: machDir.appendingPathComponent("rootfs.ext4"), templateURL: templateURL)
 
@@ -504,14 +551,8 @@ public final class RPCServer: @unchecked Sendable {
                         }
                         let cloneRes = clonefile(srcFile.path, dstFile.path, 0)
                         if cloneRes != 0 {
-                            if let attrs = try? fm.attributesOfItem(atPath: srcFile.path),
-                               let size = attrs[.size] as? Int64, size > 10 * 1024 * 1024 {
-                                let fd = open(dstFile.path, O_RDWR | O_CREAT | O_TRUNC, 0o644)
-                                if fd >= 0 {
-                                    ftruncate(fd, off_t(size))
-                                    close(fd)
-                                }
-                            } else {
+                            // Real block copy fallback (e.g. cross-volume or non-APFS)
+                            if copyfile(srcFile.path, dstFile.path, nil, copyfile_flags_t(COPYFILE_ALL)) != 0 {
                                 try? fm.copyItem(at: srcFile, to: dstFile)
                             }
                         }
@@ -716,7 +757,7 @@ public final class RPCServer: @unchecked Sendable {
 
             let cacheDir = ("~/.aerostack/cache" as NSString).expandingTildeInPath
             let kPath = "\(cacheDir)/vmlinux"
-            let ssdKernel = "/Volumes/AdamSSD/antigravity_workspace/orbstack_free/aerostack_runtime/cache/vmlinux"
+            let ssdKernel = "\(Self.resolveProjectRoot())/aerostack_runtime/cache/vmlinux"
             let kernelOk = fm.fileExists(atPath: kPath) || fm.fileExists(atPath: ssdKernel)
             let kernelDetail = kernelOk ? "Linux 6.x optimized microVM kernel verified" : "Guest kernel missing from cache"
             checks.append(DoctorCheckItem(name: "MicroVM Kernel", ok: kernelOk, detail: kernelDetail))

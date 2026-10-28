@@ -64,6 +64,73 @@ public final class OrbDaemonStore: ObservableObject {
         runInitialDoctor()
     }
 
+    public func isDaemonRunning() -> Bool {
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { Darwin.close(fd) }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let maxLen = MemoryLayout.size(ofValue: addr.sun_path)
+        _ = socketPath.withCString {
+            strncpy(&addr.sun_path.0, $0, maxLen - 1)
+        }
+        let addrLen = socklen_t(MemoryLayout<sockaddr_un>.size)
+        let res = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, addrLen)
+            }
+        }
+        return res == 0
+    }
+
+    public func ensureDaemonRunning() {
+        if isDaemonRunning() {
+            self.isConnected = true
+            refreshAll()
+            return
+        }
+
+        let home = NSHomeDirectory()
+        let envRoot = ProcessInfo.processInfo.environment["AEROSTACK_WORKSPACE"]
+        var candidates: [String] = []
+        if let root = envRoot {
+            candidates.append("\(root)/build/orb-vmd")
+        }
+        candidates.append(contentsOf: [
+            Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("orb-vmd").path,
+            "\(home)/.aerostack/bin/orb-vmd",
+            "/usr/local/bin/orb-vmd",
+            "/Volumes/AdamSSD/antigravity_workspace/orbstack_free/build/orb-vmd"
+        ])
+
+        guard let binaryPath = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            showToast(title: "Cannot locate orb-vmd", subtitle: "Please run 'make all' first", type: .error)
+            return
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binaryPath)
+        process.arguments = []
+        do {
+            try process.run()
+            showToast(title: "Starting AeroStack daemon...", type: .info)
+            Task {
+                for _ in 0..<30 {
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    if self.isDaemonRunning() {
+                        self.isConnected = true
+                        self.refreshAll()
+                        self.showToast(title: "AeroStack started successfully", type: .success)
+                        break
+                    }
+                }
+            }
+        } catch {
+            showToast(title: "Failed to launch orb-vmd", subtitle: error.localizedDescription, type: .error)
+        }
+    }
+
     public func refreshAll() {
         fetchMachines()
         fetchContainers()
@@ -441,7 +508,8 @@ public final class OrbDaemonStore: ObservableObject {
         ))
 
         // 6. 6.x Optimized MicroVM Kernel
-        let kernelPath = "/Volumes/AdamSSD/antigravity_workspace/orbstack_free/aerostack_runtime/cache/vmlinux"
+        let root = ProcessInfo.processInfo.environment["AEROSTACK_WORKSPACE"] ?? "/Volumes/AdamSSD/antigravity_workspace/orbstack_free"
+        let kernelPath = "\(root)/aerostack_runtime/cache/vmlinux"
         let altKernel = ("~/.aerostack/cache/vmlinux" as NSString).expandingTildeInPath
         let kernelExists = FileManager.default.fileExists(atPath: kernelPath) || FileManager.default.fileExists(atPath: altKernel)
         checks.append(DoctorCheckResult(
@@ -533,9 +601,11 @@ public final class OrbDaemonStore: ObservableObject {
             guard let binary = dockerPaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
                 return
             }
+            let aeroSock = ("~/.aerostack/run/docker.sock" as NSString).expandingTildeInPath
+            let finalArgs = ["-H", "unix://\(aeroSock)"] + arguments
             let p = Process()
             p.executableURL = URL(fileURLWithPath: binary)
-            p.arguments = arguments
+            p.arguments = finalArgs
             try? p.run()
             p.waitUntilExit()
         }

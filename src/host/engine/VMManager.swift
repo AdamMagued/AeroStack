@@ -150,7 +150,14 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
 
         // 4. Filesystem Sharing (VirtioFS host shares)
         var fsDevices: [VZDirectorySharingDeviceConfiguration] = []
-        for share in spec.shareConfigs {
+        var shares = spec.shareConfigs
+        if !shares.contains(where: { $0.tag == "mac_users" }) && FileManager.default.fileExists(atPath: "/Users") {
+            shares.append(VMShareConfig(hostURL: URL(fileURLWithPath: "/Users"), tag: "mac_users", isReadOnly: false))
+        }
+        if !shares.contains(where: { $0.tag == "mac_volumes" }) && FileManager.default.fileExists(atPath: "/Volumes") {
+            shares.append(VMShareConfig(hostURL: URL(fileURLWithPath: "/Volumes"), tag: "mac_volumes", isReadOnly: false))
+        }
+        for share in shares {
             if FileManager.default.fileExists(atPath: share.hostURL.path) {
                 let sharedDir = VZSharedDirectory(url: share.hostURL, readOnly: share.isReadOnly)
                 let singleShare = VZSingleDirectoryShare(directory: sharedDir)
@@ -260,7 +267,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
 
             stateLock.withLock {
                 self.startedAt = Date()
-                self.ipAddress = "192.168.138.2"
+                self.ipAddress = "192.168.64.2"
                 updateState(.running)
             }
 

@@ -223,6 +223,23 @@ func (pt *PathTranslator) TranslateContainerCreateRequestBody(body []byte) ([]by
 					}
 				}
 			}
+
+			// Rewrite PortBindings: if HostIp is 127.0.0.1, change to 0.0.0.0 so guest dockerd binds on eth0 for macOS host forwarding
+			if pbRaw, ok := hostConfig["PortBindings"]; ok && pbRaw != nil {
+				if pbMap, ok := pbRaw.(map[string]interface{}); ok {
+					for _, bindings := range pbMap {
+						if bList, ok := bindings.([]interface{}); ok {
+							for _, b := range bList {
+								if bMap, ok := b.(map[string]interface{}); ok {
+									if hostIp, ok := bMap["HostIp"].(string); ok && (hostIp == "127.0.0.1" || hostIp == "") {
+										bMap["HostIp"] = "0.0.0.0"
+									}
+								}
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 

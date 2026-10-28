@@ -71,7 +71,10 @@ mkdir -p /tmp/rootfs/etc/apk
 cp -r /etc/apk/keys /etc/apk/repositories /tmp/rootfs/etc/apk/
 
 apk add --root /tmp/rootfs --initdb --no-cache \
-    alpine-base ca-certificates docker containerd runc iptables iproute2 e2fsprogs e2fsprogs-extra util-linux procps >/dev/null
+    alpine-base busybox ca-certificates docker containerd runc iptables iproute2 e2fsprogs e2fsprogs-extra util-linux procps >/dev/null
+
+echo "  * Installing busybox applet symlinks..."
+chroot /tmp/rootfs /bin/busybox --install -s
 
 echo "  * Installing and decompressing kernel modules..."
 mkdir -p /tmp/rootfs/lib
@@ -181,18 +184,15 @@ if ip link show eth0 >/dev/null 2>&1; then
         sleep 0.1
     done
 
-    # Run udhcpc for dynamic lease negotiation
-    echo "[AERO-INIT] Negotiating DHCP lease on eth0..."
-    udhcpc -i eth0 -s /usr/share/udhcpc/default.script -n -t 5 -T 2 -q >/dev/kmsg 2>&1 || \
-        udhcpc -i eth0 -b -s /usr/share/udhcpc/default.script >/dev/kmsg 2>&1 &
-
-    # Detect dynamic gateway rather than hardcoding 192.168.64.1
-    GATEWAY=$(ip route show default dev eth0 2>/dev/null | cut -d" " -f3 | head -n 1)
-    if [ -z "${GATEWAY}" ]; then
-        GATEWAY="192.168.64.1"
-        ip addr add 192.168.64.2/24 dev eth0 2>/dev/null || true
-        ip route add default via "${GATEWAY}" dev eth0 2>/dev/null || true
-    fi
+    # Static network configuration on eth0 for macOS Virtualization bridge routing
+    echo "[AERO-INIT] Configuring static IPv4 network on eth0 (192.168.64.2/24 -> 192.168.64.1)..."
+    sysctl -w net.ipv4.conf.all.arp_notify=1 net.ipv4.conf.eth0.arp_notify=1 2>/dev/null || true
+    sysctl -w net.ipv4.conf.all.arp_accept=1 net.ipv4.conf.eth0.arp_accept=1 2>/dev/null || true
+    ip addr flush dev eth0 2>/dev/null || true
+    ip addr add 192.168.64.2/24 dev eth0 2>/dev/null || true
+    GATEWAY="192.168.64.1"
+    ip route replace default via "${GATEWAY}" dev eth0 2>/dev/null || true
+    ping -c 1 -W 1 "${GATEWAY}" >/dev/null 2>&1 || true
 
     # Add host.docker.internal pointing to the host gateway into guest /etc/hosts
     sed -i "/host\.docker\.internal/d" /etc/hosts 2>/dev/null || true
@@ -211,10 +211,12 @@ EOF_RESOLV
     echo "[AERO-INIT] Network eth0 configured (gateway: ${GATEWAY}, host.docker.internal mapped)."
 fi
 
-# VirtioFS workspace mounts
-mkdir -p /workspace /mnt/mac
+# VirtioFS directory shares
+mkdir -p /Users /Volumes /workspace /mnt/mac
+mount -t virtiofs mac_users /Users 2>/dev/null || true
+mount -t virtiofs mac_volumes /Volumes 2>/dev/null || true
 mount -t virtiofs orb_fs /workspace 2>/dev/null || mount -t virtiofs orb_fs /mnt/mac 2>/dev/null || true
-echo "[AERO-INIT] VirtioFS workspace mounted at /workspace."
+echo "[AERO-INIT] VirtioFS directory shares active (/Users, /Volumes, /workspace)."
 
 # Apple Silicon Rosetta 2 Linux Binary Translation
 mkdir -p /run/rosetta /media/rosetta /proc/sys/fs/binfmt_misc
@@ -226,7 +228,7 @@ if mount -t virtiofs rosetta /run/rosetta 2>/dev/null || mount -t virtiofs roset
     fi
     if [ -f "${ROSETTA_BIN}" ] && [ -w /proc/sys/fs/binfmt_misc/register ]; then
         if [ ! -f /proc/sys/fs/binfmt_misc/rosetta ]; then
-            echo ":rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:${ROSETTA_BIN}:CF" > /proc/sys/fs/binfmt_misc/register 2>/dev/null || true
+            printf "%s\n" ":rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:${ROSETTA_BIN}:CF" > /proc/sys/fs/binfmt_misc/register 2>/dev/null || true
         fi
         echo "[AERO-INIT] Apple Silicon Rosetta 2 binfmt_misc registered for x86_64 Linux translation."
     fi
@@ -238,22 +240,23 @@ containerd --config /etc/containerd/config.toml >/dev/kmsg 2>&1 &
 echo "[AERO-INIT] containerd service active."
 
 # Start dockerd
-dockerd --debug --config-file /etc/docker/daemon.json >/dev/kmsg 2>&1 &
+dockerd --debug -H unix:///var/run/docker.sock --config-file /etc/docker/daemon.json >/dev/kmsg 2>&1 &
 echo "[AERO-INIT] dockerd daemon launched with debug logging."
 
 # Poll for dockerd Unix domain socket
-for i in $(seq 1 100); do
+for i in $(seq 1 200); do
     if [ -S /var/run/docker.sock ]; then
         echo "[AERO-INIT] Docker daemon socket ready: /var/run/docker.sock"
         break
     fi
-    sleep 0.05
+    sleep 0.1
 done
 
 # Preload alpine container image into dockerd
 if [ -f /var/lib/docker-preload/alpine.tar ]; then
     echo "[AERO-INIT] Preloading alpine image into dockerd..."
-    docker load -i /var/lib/docker-preload/alpine.tar >/dev/kmsg 2>&1 &
+    docker load -i /var/lib/docker-preload/alpine.tar >/dev/kmsg 2>&1 || true
+    echo "[AERO-INIT] Alpine image preload completed."
 fi
 
 # Start AeroStack guest agent

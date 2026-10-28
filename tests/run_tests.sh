@@ -14,6 +14,9 @@ echo "======================================================================"
 
 # 1. Clean AppleDouble metadata on external volume
 find "$REPO_ROOT" -name "._*" -delete 2>/dev/null || true
+if [ -f "$REPO_ROOT/build/entitlements.plist" ] && [ -f "$REPO_ROOT/build/orb-vmd" ]; then
+    codesign --force --sign - --entitlements "$REPO_ROOT/build/entitlements.plist" "$REPO_ROOT/build/orb-vmd" 2>/dev/null || true
+fi
 
 # 2. Static Zero-Stubs & Zero-Emojis Verification
 echo "--> 1. Running Zero-Stubs & Zero-Emojis Verification..."

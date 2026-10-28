@@ -21,6 +21,7 @@ func main() {
 	dnsBind := flag.String("dns-bind", "127.0.0.1:5354", "Address and port for embedded RFC 1035 DNS server")
 	upstreamDNS := flag.String("upstream-dns", "1.1.1.1:53", "Upstream DNS resolver for non-.orb.local queries")
 	routerIP := flag.String("router-ip", "192.168.128.1", "IPv4 address for userspace router gateway")
+	guestIP := flag.String("guest-ip", "192.168.64.2", "IPv4 address for Linux microVM guest")
 	enableMDNS := flag.Bool("enable-mdns", true, "Enable Bonjour / mDNS local advertiser")
 	versionFlag := flag.Bool("version", false, "Print network daemon version and exit")
 	flag.Parse()
@@ -32,7 +33,7 @@ func main() {
 
 	log.Printf("==================================================================")
 	log.Printf(" Starting orb-netd v%s (Userspace Network & DNS Engine)", NetdVersion)
-	log.Printf(" Router IP: %s | DNS Bind: %s | Upstream: %s", *routerIP, *dnsBind, *upstreamDNS)
+	log.Printf(" Router IP: %s | Guest IP: %s | DNS Bind: %s | Upstream: %s", *routerIP, *guestIP, *dnsBind, *upstreamDNS)
 	log.Printf("==================================================================")
 
 	// 1. Initialize Userspace Router
@@ -87,7 +88,7 @@ func main() {
 	portForwarder.Start()
 	log.Printf("[orb-netd:forward] Userspace dynamic port forwarding active")
 
-	dockerWatcher := NewDockerPortWatcher(*dockerSock, portForwarder, *routerIP)
+	dockerWatcher := NewDockerPortWatcher(*dockerSock, portForwarder, *guestIP)
 	dockerWatcher.Start()
 
 	// 4. Initialize Bonjour mDNS Advertiser

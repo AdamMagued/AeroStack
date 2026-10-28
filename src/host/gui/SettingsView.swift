@@ -13,7 +13,7 @@ public struct SettingsView: View {
     @State private var batterySaver: Bool = false
     @State private var autoStart: Bool = true
     @State private var dnsDomain: String = "orb.local"
-    @State private var storageLocation: String = "/Volumes/AdamSSD/antigravity_workspace/orbstack_free/data"
+    @State private var storageLocation: String = (ProcessInfo.processInfo.environment["AEROSTACK_WORKSPACE"].map { ($0 as NSString).appendingPathComponent("data") } ?? ("~/.aerostack/data" as NSString).expandingTildeInPath)
     @State private var saveSuccess: Bool = false
     @State private var dockerContextSwitched: Bool = false
 

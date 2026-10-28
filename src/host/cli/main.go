@@ -8,15 +8,18 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
 	"os/user"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
 	mach "orbstack_free/src/host/machine"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var (
@@ -136,12 +139,12 @@ func newRPCClient(sock string) *RPCClient {
 	}
 	return &RPCClient{
 		socketPath: sock,
-		timeout:    5 * time.Second,
+		timeout:    60 * time.Second,
 	}
 }
 
 func (c *RPCClient) Call(method string, params interface{}, result interface{}) error {
-	conn, err := net.DialTimeout("unix", c.socketPath, c.timeout)
+	conn, err := net.DialTimeout("unix", c.socketPath, 5*time.Second)
 	if err != nil {
 		return fmt.Errorf("daemon is not running at %s: %w", c.socketPath, err)
 	}
@@ -369,10 +372,14 @@ func newCreateCmd() *cobra.Command {
 
 			var success bool
 			if err := client.Call("vm.create", params, &success); err != nil {
-				// Local MachineManager provisioner
-				mgr := mach.NewManager("", "")
-				if _, mErr := mgr.CreateMachine(machineName, distroSpec, 2, 2048, diskFlag); mErr != nil {
-					return fmt.Errorf("failed to create machine: %w", mErr)
+				if strings.Contains(err.Error(), "daemon is not running") {
+					// Local MachineManager provisioner
+					mgr := mach.NewManager("", "")
+					if _, mErr := mgr.CreateMachine(machineName, distroSpec, 2, 2048, diskFlag); mErr != nil {
+						return fmt.Errorf("failed to create machine: %w", mErr)
+					}
+				} else {
+					return fmt.Errorf("failed to create machine: %w", err)
 				}
 			}
 
@@ -440,7 +447,7 @@ func newRunCmd() *cobra.Command {
 				return fmt.Errorf("failed to connect to execution server on %s: %w (ensure microVM is running)", addr, err)
 			}
 			defer conn.Close()
-			exitCode, _, err := runRemoteExec(conn, targetMachine, targetUser, workdir, command)
+			exitCode, _, err := runRemoteExec(conn, targetMachine, targetUser, workdir, command, cmd.OutOrStdout(), cmd.ErrOrStderr())
 			if err != nil {
 				return fmt.Errorf("remote execution error: %w", err)
 			}
@@ -459,21 +466,58 @@ func newRunCmd() *cobra.Command {
 }
 
 func isatty(fd uintptr) bool {
-	stat, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return (stat.Mode() & os.ModeCharDevice) != 0
+	return term.IsTerminal(int(fd))
 }
 
-func runRemoteExec(conn net.Conn, mach, u, wdir string, cmd []string) (int, time.Duration, error) {
+func sendResizeFrame(conn net.Conn, rows, cols uint16) error {
+	payload, err := json.Marshal(map[string]uint16{
+		"rows": rows,
+		"cols": cols,
+	})
+	if err != nil {
+		return err
+	}
+	frame := make([]byte, 5+len(payload))
+	frame[0] = 6 // ExecMsgWindowResize
+	binary.BigEndian.PutUint32(frame[1:], uint32(len(payload)))
+	copy(frame[5:], payload)
+	_, err = conn.Write(frame)
+	return err
+}
+
+func runRemoteExec(conn net.Conn, mach, u, wdir string, cmd []string, outWriter, errWriter io.Writer) (int, time.Duration, error) {
 	start := time.Now()
+	if outWriter == nil {
+		outWriter = os.Stdout
+	}
+	if errWriter == nil {
+		errWriter = os.Stderr
+	}
+
+	stdinFd := int(os.Stdin.Fd())
+	ttyMode := isatty(os.Stdin.Fd())
+	var initialRows, initialCols uint16 = 24, 80
+
+	if ttyMode {
+		w, h, err := term.GetSize(stdinFd)
+		if err == nil && w > 0 && h > 0 {
+			initialCols = uint16(w)
+			initialRows = uint16(h)
+		}
+		oldState, rErr := term.MakeRaw(stdinFd)
+		if rErr == nil {
+			defer term.Restore(stdinFd, oldState)
+		}
+	}
+
 	req := map[string]interface{}{
 		"machine":  mach,
 		"command":  cmd,
 		"user":     u,
 		"work_dir": wdir,
-		"tty":      isatty(os.Stdin.Fd()),
+		"tty":      ttyMode,
+		"rows":     initialRows,
+		"cols":     initialCols,
 	}
 	reqBytes, err := json.Marshal(req)
 	if err != nil {
@@ -507,6 +551,24 @@ func runRemoteExec(conn net.Conn, mach, u, wdir string, cmd []string) (int, time
 	}
 	if err := json.Unmarshal(rBody, &initResp); err == nil && !initResp.Started && initResp.Error != "" {
 		return -1, 0, fmt.Errorf("remote exec failed: %s", initResp.Error)
+	}
+
+	// Forward SIGWINCH in TTY mode
+	if ttyMode {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGWINCH)
+		defer func() {
+			signal.Stop(sigCh)
+			close(sigCh)
+		}()
+		go func() {
+			for range sigCh {
+				w, h, gErr := term.GetSize(stdinFd)
+				if gErr == nil && w > 0 && h > 0 {
+					_ = sendResizeFrame(conn, uint16(h), uint16(w))
+				}
+			}
+		}()
 	}
 
 	// Pump stdin in background
@@ -544,9 +606,9 @@ func runRemoteExec(conn net.Conn, mach, u, wdir string, cmd []string) (int, time
 		}
 
 		if mType == 4 { // Stdout
-			os.Stdout.Write(pBuf)
+			outWriter.Write(pBuf)
 		} else if mType == 5 { // Stderr
-			os.Stderr.Write(pBuf)
+			errWriter.Write(pBuf)
 		} else if mType == 7 { // ExitStatus
 			if len(pBuf) >= 4 {
 				exitCode = int(int32(binary.BigEndian.Uint32(pBuf)))
@@ -745,9 +807,13 @@ func newDeleteCmd() *cobra.Command {
 			client := newRPCClient(socketPath)
 			var success bool
 			if err := client.Call("vm.delete", map[string]interface{}{"name": name}, &success); err != nil {
-				mgr := mach.NewManager("", "")
-				if mErr := mgr.DeleteMachine(name); mErr != nil {
-					return fmt.Errorf("failed to delete machine: %w", mErr)
+				if strings.Contains(err.Error(), "daemon is not running") {
+					mgr := mach.NewManager("", "")
+					if mErr := mgr.DeleteMachine(name); mErr != nil {
+						return fmt.Errorf("failed to delete machine: %w", mErr)
+					}
+				} else {
+					return fmt.Errorf("failed to delete machine: %w", err)
 				}
 			}
 			fmt.Printf("Machine %s deleted.\n", name)
@@ -772,9 +838,13 @@ func newCloneCmd() *cobra.Command {
 				"source":      src,
 				"destination": dst,
 			}, &success); err != nil {
-				mgr := mach.NewManager("", "")
-				if _, mErr := mgr.CloneMachine(src, dst); mErr != nil {
-					return fmt.Errorf("failed to clone machine: %w", mErr)
+				if strings.Contains(err.Error(), "daemon is not running") {
+					mgr := mach.NewManager("", "")
+					if _, mErr := mgr.CloneMachine(src, dst); mErr != nil {
+						return fmt.Errorf("failed to clone machine: %w", mErr)
+					}
+				} else {
+					return fmt.Errorf("failed to clone machine: %w", err)
 				}
 			}
 			fmt.Printf("Cloned %s to %s in %v!\n", src, dst, time.Since(start))
@@ -848,9 +918,44 @@ func newDoctorCmd() *cobra.Command {
 	}
 }
 
+func getProjectRoot() string {
+	if env := os.Getenv("AEROSTACK_WORKSPACE"); env != "" {
+		return env
+	}
+	exe, err := os.Executable()
+	if err == nil {
+		dir := filepath.Dir(exe)
+		for i := 0; i < 5; i++ {
+			if _, err := os.Stat(filepath.Join(dir, "aerostack_runtime")); err == nil {
+				return dir
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		dir := cwd
+		for i := 0; i < 5; i++ {
+			if _, err := os.Stat(filepath.Join(dir, "aerostack_runtime")); err == nil {
+				return dir
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+	return "/Volumes/AdamSSD/antigravity_workspace/orbstack_free"
+}
+
 func runLocalDoctorChecks() DoctorReportDTO {
 	var checks []DoctorCheckDTO
 	home, _ := os.UserHomeDir()
+	projRoot := getProjectRoot()
 
 	// 1. Darwin check
 	checks = append(checks, DoctorCheckDTO{
@@ -881,7 +986,7 @@ func runLocalDoctorChecks() DoctorReportDTO {
 	})
 
 	// 4. VirtioFS workspace
-	workspace := "/Volumes/AdamSSD/antigravity_workspace"
+	workspace := filepath.Dir(projRoot)
 	_, wErr := os.Stat(workspace)
 	checks = append(checks, DoctorCheckDTO{
 		Name:   "VirtioFS high-speed directory sharing mounted",
@@ -898,7 +1003,7 @@ func runLocalDoctorChecks() DoctorReportDTO {
 
 	// 6. MicroVM Kernel
 	kernelPath := filepath.Join(home, ".aerostack", "cache", "vmlinux")
-	ssdKernel := "/Volumes/AdamSSD/antigravity_workspace/orbstack_free/aerostack_runtime/cache/vmlinux"
+	ssdKernel := filepath.Join(projRoot, "aerostack_runtime", "cache", "vmlinux")
 	_, kErr1 := os.Stat(kernelPath)
 	_, kErr2 := os.Stat(ssdKernel)
 	checks = append(checks, DoctorCheckDTO{

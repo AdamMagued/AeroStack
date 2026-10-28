@@ -21,7 +21,7 @@ struct OrbStackFreeApp: App {
                 Divider()
 
                 Button("Start AeroStack") {
-                    store.startMachine(name: "aerostack")
+                    store.ensureDaemonRunning()
                 }
                 .disabled(store.isConnected)
 

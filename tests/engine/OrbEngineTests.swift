@@ -321,11 +321,13 @@ final class OrbEngineTests: XCTestCase {
     }
 
     func testRPCServerMachineLifecycleAndDoctor() throws {
-        let tempBase = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("orb_rpc_test_\(UUID().uuidString)")
-        let tempSock = tempBase.appendingPathComponent("test.sock").path
-        let tempMachDir = tempBase.appendingPathComponent("machines")
+        let tempSock = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("test_\(UUID().uuidString).sock").path
+        let tempMachDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("orb_rpc_test_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempMachDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempBase) }
+        defer {
+            unlink(tempSock)
+            try? FileManager.default.removeItem(at: tempMachDir)
+        }
 
         let server = RPCServer(socketPath: tempSock, machinesDirectory: tempMachDir)
         try server.start()

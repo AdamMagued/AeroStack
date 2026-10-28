@@ -17,13 +17,14 @@ struct OrbVMDMain {
         """)
 
         // Resolve runtime paths
+        let projectRoot = resolveProjectRoot()
         var cacheDir = ("~/.aerostack/cache" as NSString).expandingTildeInPath
         var socketPath = ("~/.aerostack/run/vmcontrol.sock" as NSString).expandingTildeInPath
         var dockerSocketPath = ("~/.aerostack/run/docker.sock" as NSString).expandingTildeInPath
-        var watchDir = "/Volumes/AdamSSD/antigravity_workspace"
+        var watchDir = projectRoot
 
         // Fallback to internal external workspace if default symlink not resolved
-        let ssdDefaultCache = "/Volumes/AdamSSD/antigravity_workspace/orbstack_free/aerostack_runtime/cache"
+        let ssdDefaultCache = "\(projectRoot)/aerostack_runtime/cache"
         if !FileManager.default.fileExists(atPath: cacheDir) && FileManager.default.fileExists(atPath: ssdDefaultCache) {
             cacheDir = ssdDefaultCache
         }
@@ -88,7 +89,7 @@ struct OrbVMDMain {
         let fm = FileManager.default
         if !fm.fileExists(atPath: kernelPath) || !fm.fileExists(atPath: initrdPath) || !fm.fileExists(atPath: rootfsPath) {
             print("[ENGINE] Required guest assets missing from cache. Triggering automated build pipeline...")
-            let builderScript = "/Volumes/AdamSSD/antigravity_workspace/orbstack_free/scripts/build_guest_assets.sh"
+            let builderScript = "\(projectRoot)/scripts/build_guest_assets.sh"
             if fm.fileExists(atPath: builderScript) {
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -133,13 +134,16 @@ struct OrbVMDMain {
                 VMDiskConfig(imageURL: URL(fileURLWithPath: rootfsPath), isReadOnly: false, cacheSync: true)
             ],
             shareConfigs: [
+                VMShareConfig(hostURL: URL(fileURLWithPath: "/Users"), tag: "mac_users", isReadOnly: false),
+                VMShareConfig(hostURL: URL(fileURLWithPath: "/Volumes"), tag: "mac_volumes", isReadOnly: false),
                 VMShareConfig(hostURL: URL(fileURLWithPath: watchDir), tag: "orb_fs", isReadOnly: false)
             ]
         )
         let vmManager = VMManager(spec: spec)
 
-        // 3. Dynamic Memory Balloon Controller
+        // 3. Dynamic Memory Balloon Controller with Darwin Memory Pressure
         let balloonController = MemoryBalloonController(initialTargetMB: 512)
+        balloonController.startMonitoringMemoryPressure()
         let footprint = MemoryBalloonController.queryHostFootprint()
         print(String(format: "[MEMORY] Initial Host Footprint: %.2f MB resident, %.2f MB phys_footprint", footprint.residentMB, footprint.footprintMB))
 
@@ -208,7 +212,7 @@ struct OrbVMDMain {
                 "--backend-mode", "unix",
                 "--backend-socket", backendDockerSocket,
                 "--sockets", "\(dockerSocketPath),/var/run/docker.sock",
-                "--mount-prefix", "/workspace"
+                "--mount-prefix", "/"
             ]
             if let p = spawnSubprocess(binaryPath: bridgeBin, arguments: bridgeArgs) {
                 print("[ENGINE] Spawned orb-docker-bridge (PID: \(p.processIdentifier))")
@@ -224,7 +228,8 @@ struct OrbVMDMain {
 
         if let netdBin = resolveBinaryPath(name: "orb-netd") {
             let netdArgs = [
-                "--docker-sock", dockerSocketPath
+                "--docker-sock", dockerSocketPath,
+                "--guest-ip", "192.168.64.2"
             ]
             if let p = spawnSubprocess(binaryPath: netdBin, arguments: netdArgs) {
                 print("[ENGINE] Spawned orb-netd (PID: \(p.processIdentifier))")
@@ -293,10 +298,31 @@ struct OrbVMDMain {
 
     nonisolated(unsafe) static var childProcesses: [Process] = []
 
+    public static func resolveProjectRoot() -> String {
+        if let env = ProcessInfo.processInfo.environment["AEROSTACK_ROOT"], FileManager.default.fileExists(atPath: env) {
+            return env
+        }
+        let execURL = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+        let candidate1 = execURL.deletingLastPathComponent().deletingLastPathComponent()
+        if FileManager.default.fileExists(atPath: candidate1.appendingPathComponent("Package.swift").path) {
+            return candidate1.path
+        }
+        let cwd = FileManager.default.currentDirectoryPath
+        if FileManager.default.fileExists(atPath: (cwd as NSString).appendingPathComponent("Package.swift")) {
+            return cwd
+        }
+        let ssdPath = "/Volumes/AdamSSD/antigravity_workspace/orbstack_free"
+        if FileManager.default.fileExists(atPath: ssdPath) {
+            return ssdPath
+        }
+        return ("~/.aerostack" as NSString).expandingTildeInPath
+    }
+
     private static func resolveBinaryPath(name: String) -> String? {
         let fm = FileManager.default
+        let root = resolveProjectRoot()
         let candidates = [
-            "/Volumes/AdamSSD/antigravity_workspace/orbstack_free/build/\(name)",
+            "\(root)/build/\(name)",
             Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent(name).path,
             "/usr/local/bin/\(name)"
         ]

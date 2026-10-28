@@ -279,3 +279,167 @@ func TestDockerForwarder_Proxying(t *testing.T) {
 		t.Fatalf("Expected 200 OK, got: %s", string(respBuf[:n]))
 	}
 }
+
+func TestExecServer_PTYAllocation(t *testing.T) {
+	server := NewExecServer(ExecServerConfig{ListenPort: 0})
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to create loopback listener: %v", err)
+	}
+	defer l.Close()
+
+	server.listener = l
+	server.running = 1
+	server.wg.Add(1)
+	go server.acceptLoop()
+	defer server.Stop()
+
+	conn, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		t.Fatalf("Failed to dial exec server: %v", err)
+	}
+	defer conn.Close()
+
+	// Send ExecRequest with TTY enabled
+	req := ExecRequest{
+		Command: []string{"sh", "-c", "echo hello_pty"},
+		Tty:     true,
+		Rows:    24,
+		Cols:    80,
+	}
+	reqBytes, _ := json.Marshal(req)
+	hdr := make([]byte, 5)
+	hdr[0] = byte(ExecMsgRequest)
+	binary.BigEndian.PutUint32(hdr[1:], uint32(len(reqBytes)))
+	_, _ = conn.Write(hdr)
+	_, _ = conn.Write(reqBytes)
+
+	// Send window resize frame
+	resizePayload, _ := json.Marshal(WindowResizePayload{Rows: 30, Cols: 100})
+	resizeHdr := make([]byte, 5+len(resizePayload))
+	resizeHdr[0] = byte(ExecMsgWindowResize)
+	binary.BigEndian.PutUint32(resizeHdr[1:], uint32(len(resizePayload)))
+	copy(resizeHdr[5:], resizePayload)
+	_, _ = conn.Write(resizeHdr)
+
+	// Read response
+	respHdr := make([]byte, 5)
+	if _, err := io.ReadFull(conn, respHdr); err != nil {
+		t.Fatalf("Failed to read resp header: %v", err)
+	}
+	respLen := binary.BigEndian.Uint32(respHdr[1:])
+	respBody := make([]byte, respLen)
+	if _, err := io.ReadFull(conn, respBody); err != nil {
+		t.Fatalf("Failed to read resp body: %v", err)
+	}
+	var execResp ExecResponse
+	if err := json.Unmarshal(respBody, &execResp); err != nil || !execResp.Started {
+		t.Fatalf("Exec did not start cleanly: %v, resp: %+v", err, execResp)
+	}
+
+	var stdoutBuf bytes.Buffer
+	var exitCode int
+	for {
+		fHdr := make([]byte, 5)
+		if _, err := io.ReadFull(conn, fHdr); err != nil {
+			break
+		}
+		mType := ExecMsgType(fHdr[0])
+		pLen := binary.BigEndian.Uint32(fHdr[1:])
+		pBuf := make([]byte, pLen)
+		if _, err := io.ReadFull(conn, pBuf); err != nil {
+			break
+		}
+		if mType == ExecMsgDataStdout {
+			stdoutBuf.Write(pBuf)
+		} else if mType == ExecMsgExitStatus {
+			exitCode = int(int32(binary.BigEndian.Uint32(pBuf)))
+			break
+		}
+	}
+
+	if exitCode != 0 {
+		t.Fatalf("Expected exit code 0, got %d", exitCode)
+	}
+	if !bytes.Contains(stdoutBuf.Bytes(), []byte("hello_pty")) {
+		t.Fatalf("Expected 'hello_pty' in output, got: %q", stdoutBuf.String())
+	}
+}
+
+func TestExecServer_NonTTYBackgroundChild(t *testing.T) {
+	server := NewExecServer(ExecServerConfig{ListenPort: 0})
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to create loopback listener: %v", err)
+	}
+	defer l.Close()
+
+	server.listener = l
+	server.running = 1
+	server.wg.Add(1)
+	go server.acceptLoop()
+	defer server.Stop()
+
+	conn, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		t.Fatalf("Failed to dial exec server: %v", err)
+	}
+	defer conn.Close()
+
+	start := time.Now()
+	// Command spawns background sleep 10 and exits immediately
+	req := ExecRequest{
+		Command: []string{"sh", "-c", "sleep 10 & echo background_test_ok"},
+		Tty:     false,
+	}
+	reqBytes, _ := json.Marshal(req)
+	hdr := make([]byte, 5)
+	hdr[0] = byte(ExecMsgRequest)
+	binary.BigEndian.PutUint32(hdr[1:], uint32(len(reqBytes)))
+	_, _ = conn.Write(hdr)
+	_, _ = conn.Write(reqBytes)
+
+	// Read response
+	respHdr := make([]byte, 5)
+	if _, err := io.ReadFull(conn, respHdr); err != nil {
+		t.Fatalf("Failed to read resp header: %v", err)
+	}
+	respLen := binary.BigEndian.Uint32(respHdr[1:])
+	respBody := make([]byte, respLen)
+	if _, err := io.ReadFull(conn, respBody); err != nil {
+		t.Fatalf("Failed to read resp body: %v", err)
+	}
+
+	var stdoutBuf bytes.Buffer
+	var exitCode int
+	for {
+		fHdr := make([]byte, 5)
+		if _, err := io.ReadFull(conn, fHdr); err != nil {
+			break
+		}
+		mType := ExecMsgType(fHdr[0])
+		pLen := binary.BigEndian.Uint32(fHdr[1:])
+		pBuf := make([]byte, pLen)
+		if _, err := io.ReadFull(conn, pBuf); err != nil {
+			break
+		}
+		if mType == ExecMsgDataStdout {
+			stdoutBuf.Write(pBuf)
+		} else if mType == ExecMsgExitStatus {
+			exitCode = int(int32(binary.BigEndian.Uint32(pBuf)))
+			break
+		}
+	}
+
+	elapsed := time.Since(start)
+	if elapsed > 3*time.Second {
+		t.Fatalf("Execution took too long (%v), pipe deadlock on background child detected!", elapsed)
+	}
+	if exitCode != 0 {
+		t.Fatalf("Expected exit code 0, got %d", exitCode)
+	}
+	if !bytes.Contains(stdoutBuf.Bytes(), []byte("background_test_ok")) {
+		t.Fatalf("Expected 'background_test_ok' in output, got: %q", stdoutBuf.String())
+	}
+}
+

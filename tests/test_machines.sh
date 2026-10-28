@@ -34,11 +34,17 @@ if [ -z "$VMD_PID" ]; then
     done
 fi
 
+# Pre-test cleanup to ensure clean slate across test runs
+"$ORBCTL" stop test-ci-ubuntu 2>/dev/null || true
+"$ORBCTL" delete test-ci-ubuntu 2>/dev/null || true
+"$ORBCTL" delete test-ci-ubuntu-clone 2>/dev/null || true
+rm -rf "$DATA_DIR/test-ci-ubuntu" "$DATA_DIR/test-ci-ubuntu-clone" "$DATA_DIR/._test-ci-ubuntu"* "$REPO_ROOT/data/machines/test-ci-ubuntu"* 2>/dev/null || true
+
 cleanup() {
     "$ORBCTL" stop test-ci-ubuntu 2>/dev/null || true
     "$ORBCTL" delete test-ci-ubuntu 2>/dev/null || true
     "$ORBCTL" delete test-ci-ubuntu-clone 2>/dev/null || true
-    rm -rf "$DATA_DIR/test-ci-ubuntu" "$DATA_DIR/test-ci-ubuntu-clone" "$DATA_DIR/._test-ci-ubuntu"* 2>/dev/null || true
+    rm -rf "$DATA_DIR/test-ci-ubuntu" "$DATA_DIR/test-ci-ubuntu-clone" "$DATA_DIR/._test-ci-ubuntu"* "$REPO_ROOT/data/machines/test-ci-ubuntu"* 2>/dev/null || true
     if [ "$STARTED_VMD" -eq 1 ]; then
         kill -15 "$VMD_PID" 2>/dev/null || true
     fi

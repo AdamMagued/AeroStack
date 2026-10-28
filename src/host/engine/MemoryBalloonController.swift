@@ -135,6 +135,7 @@ public final class MemoryBalloonController: @unchecked Sendable {
     private let queue = DispatchQueue(label: "dev.orbstack_free.memory_controller", qos: .userInteractive)
     private let stateLock = NSLock()
     public var vmQueue: DispatchQueue?
+    private var pressureSource: (any DispatchSourceMemoryPressure)?
 
     public init(balloonDevice: MemoryBalloonDeviceProtocol? = nil, initialTargetMB: UInt64 = 512) {
         self.balloonDevice = balloonDevice
@@ -151,6 +152,42 @@ public final class MemoryBalloonController: @unchecked Sendable {
         }
         let target = currentTargetMB * 1024 * 1024
         updateBalloonTarget(bytes: target)
+    }
+
+    public func startMonitoringMemoryPressure(queue: DispatchQueue? = nil) {
+        let q = queue ?? self.queue
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: q)
+        source.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            let event = source.data
+            self.handleHostMemoryPressure(event: event)
+        }
+        source.resume()
+        self.pressureSource = source
+        print("[MEMORY] Darwin memory pressure monitoring active (DispatchSource [.warning, .critical]).")
+    }
+
+    public func handleHostMemoryPressure(event: DispatchSource.MemoryPressureEvent) {
+        print("[MEMORY] Darwin host memory pressure event: \(event). Inflating Virtio balloon and dropping guest caches.")
+        stateLock.lock()
+        let pressureTargetMB = self.minRamMB
+        self.currentTargetMB = pressureTargetMB
+        self.updateBalloonTarget(bytes: pressureTargetMB * 1024 * 1024)
+        self.compactionRequested = true
+        stateLock.unlock()
+
+        // Drop guest page caches and compact memory over vsock
+        let compactFrame = HostControlFrame(
+            msgType: MemMessageType.compactCommand.rawValue,
+            flags: 0x3,
+            targetRamBytes: pressureTargetMB * 1024 * 1024
+        )
+        self.sendControlFrameHandler?(compactFrame)
+    }
+
+    public func stopMonitoringMemoryPressure() {
+        pressureSource?.cancel()
+        pressureSource = nil
     }
 
     private func updateBalloonTarget(bytes: UInt64) {

@@ -95,6 +95,13 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
 
     private func handleMemoryConnection(_ connection: VZVirtioSocketConnection) {
         let fd = connection.fileDescriptor
+        self.memoryController?.sendControlFrameHandler = { [weak connection] frame in
+            guard let conn = connection else { return }
+            let encoded = frame.encode()
+            _ = encoded.withUnsafeBytes { raw in
+                Darwin.write(conn.fileDescriptor, raw.baseAddress!, raw.count)
+            }
+        }
         routerQueue.async { [weak self] in
             var buf = [UInt8](repeating: 0, count: 40)
             while true {
@@ -210,7 +217,7 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
                     do {
                         let guestConn = try await self.connectToGuest(port: Self.dockerPort)
                         print("[DOCKER] Connected to guest vsock 2375, guestFd: \(guestConn.fileDescriptor)")
-                        self.spliceSockets(clientFd: clientFd, guestConn: guestConn, rewriteDockerPaths: true)
+                        self.spliceSockets(clientFd: clientFd, guestConn: guestConn)
                     } catch {
                         print("[DOCKER] Connection to guest Docker vsock (port \(Self.dockerPort)) failed: \(error)")
                         close(clientFd)
@@ -275,7 +282,7 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
                     do {
                         let guestConn = try await self.connectToGuest(port: Self.execPort)
                         print("[EXEC] Connected to guest vsock \(Self.execPort), guestFd: \(guestConn.fileDescriptor)")
-                        self.spliceSockets(clientFd: clientFd, guestConn: guestConn, rewriteDockerPaths: false)
+                        self.spliceSockets(clientFd: clientFd, guestConn: guestConn)
                     } catch {
                         print("[EXEC] Connection to guest exec vsock (port \(Self.execPort)) failed: \(error)")
                         close(clientFd)
@@ -329,7 +336,7 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
                                 }
                                 do {
                                     let guestConn = try await self.connectToGuest(port: Self.execPort)
-                                    self.spliceSockets(clientFd: clientFd, guestConn: guestConn, rewriteDockerPaths: false)
+                                    self.spliceSockets(clientFd: clientFd, guestConn: guestConn)
                                 } catch {
                                     print("[EXEC] Connection to guest exec vsock failed: \(error)")
                                     close(clientFd)
@@ -344,52 +351,9 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
         }
     }
 
-    // MARK: - Splicing with Optional Path Rewriting
+    // MARK: - Fast Raw Byte Splicing
 
-    private func rewriteContainerCreatePayload(data: Data) -> Data {
-        guard let text = String(data: data, encoding: .utf8) else {
-            return data
-        }
-        guard text.contains("/containers/create") else {
-            return data
-        }
-
-        let separator = "\r\n\r\n"
-        guard let sepRange = text.range(of: separator) else {
-            return data
-        }
-        let headersPart = String(text[..<sepRange.lowerBound])
-        let bodyPart = String(text[sepRange.upperBound...])
-
-        var newBody = bodyPart
-        newBody = newBody.replacingOccurrences(of: "/Volumes/AdamSSD/antigravity_workspace", with: "/workspace")
-        newBody = newBody.replacingOccurrences(of: "/Volumes/AdamSSD", with: "/workspace")
-
-        let homeDir = NSHomeDirectory()
-        if !homeDir.isEmpty && homeDir != "/var/root" {
-            newBody = newBody.replacingOccurrences(of: homeDir, with: "/workspace")
-        }
-
-        if newBody == bodyPart {
-            return data
-        }
-
-        guard let newBodyData = newBody.data(using: .utf8) else {
-            return data
-        }
-
-        var headerLines = headersPart.components(separatedBy: "\r\n")
-        for i in 0..<headerLines.count {
-            if headerLines[i].lowercased().hasPrefix("content-length:") {
-                headerLines[i] = "Content-Length: \(newBodyData.count)"
-            }
-        }
-        let newHeaders = headerLines.joined(separator: "\r\n")
-        let fullPayload = newHeaders + separator + newBody
-        return fullPayload.data(using: .utf8) ?? data
-    }
-
-    private func spliceSockets(clientFd: Int32, guestConn: VZVirtioSocketConnection, rewriteDockerPaths: Bool = false) {
+    private func spliceSockets(clientFd: Int32, guestConn: VZVirtioSocketConnection) {
         let guestFd = guestConn.fileDescriptor
         var optVal: Int32 = 1
         _ = setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &optVal, socklen_t(MemoryLayout<Int32>.size))
@@ -426,39 +390,15 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
         }
 
         // Client -> Guest
-        q.async { [weak self] in
+        q.async {
             let bufferSize = 65536
             let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
             defer { buf.deallocate() }
-            var isFirstChunk = true
 
             while true {
                 let n = Darwin.read(clientFd, buf, bufferSize)
                 if n <= 0 {
                     break
-                }
-
-                if isFirstChunk && rewriteDockerPaths, let self = self {
-                    isFirstChunk = false
-                    let incomingData = Data(bytes: buf, count: n)
-                    let rewritten = self.rewriteContainerCreatePayload(data: incomingData)
-                    var written = 0
-                    var writeFailed = false
-                    rewritten.withUnsafeBytes { raw in
-                        while written < raw.count {
-                            let w = Darwin.write(guestFd, raw.baseAddress!.advanced(by: written), raw.count - written)
-                            if w <= 0 {
-                                writeFailed = true
-                                break
-                            }
-                            written += w
-                        }
-                    }
-                    if writeFailed {
-                        terminate()
-                        return
-                    }
-                    continue
                 }
 
                 var written = 0

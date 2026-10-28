@@ -295,6 +295,71 @@ func TestPathTranslator_MountsArrayTranslation(t *testing.T) {
 	}
 }
 
+func TestDockerProxy_ContainersListNotInspect(t *testing.T) {
+	backendSock := fmt.Sprintf("/tmp/m_bk_list_%d.sock", time.Now().UnixNano()%1000000)
+	clientSock := fmt.Sprintf("/tmp/m_cl_list_%d.sock", time.Now().UnixNano()%1000000)
+	defer os.Remove(backendSock)
+	defer os.Remove(clientSock)
+
+	bListener, err := net.Listen("unix", backendSock)
+	if err != nil {
+		t.Fatalf("Failed to bind mock backend: %v", err)
+	}
+	defer bListener.Close()
+
+	listPayload := `[{"Id":"c1","Names":["/web"],"Image":"nginx"}]`
+	go func() {
+		conn, err := bListener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		req, _ := http.ReadRequest(bufio.NewReader(conn))
+		if req != nil {
+			resp := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(listPayload), listPayload)
+			_, _ = conn.Write([]byte(resp))
+		}
+	}()
+
+	cfg := DockerProxyConfig{
+		ListenSocketPaths: []string{clientSock},
+		BackendTransport: TransportConfig{
+			Mode:       "unix",
+			SocketPath: backendSock,
+		},
+		GuestMountPrefix: "/mnt/mac",
+	}
+
+	proxy, err := NewDockerProxy(cfg)
+	if err != nil {
+		t.Fatalf("Failed to init proxy: %v", err)
+	}
+	if err := proxy.Start(); err != nil {
+		t.Fatalf("Failed to start proxy: %v", err)
+	}
+	defer proxy.Stop()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, proto, addr string) (net.Conn, error) {
+				return net.Dial("unix", clientSock)
+			},
+		},
+	}
+
+	httpReq, _ := http.NewRequest("GET", "http://localhost/v1.45/containers/json", nil)
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if string(bodyBytes) != listPayload {
+		t.Fatalf("Expected raw array response, got: %s", string(bodyBytes))
+	}
+}
+
 func bufioReader(c net.Conn) *bufio.Reader {
 	return bufio.NewReader(c)
 }

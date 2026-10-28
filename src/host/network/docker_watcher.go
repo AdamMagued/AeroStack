@@ -64,8 +64,12 @@ func NewDockerPortWatcher(dockerSockPath string, forwarder *PortForwarder, gatew
 		home, _ := os.UserHomeDir()
 		dockerSockPath = filepath.Join(home, ".aerostack", "run", "docker.sock")
 	}
-	if gatewayIP == "" {
-		gatewayIP = "192.168.128.2"
+	if gatewayIP == "" || gatewayIP == "192.168.128.1" {
+		if envIP := os.Getenv("AEROSTACK_GUEST_IP"); envIP != "" {
+			gatewayIP = envIP
+		} else {
+			gatewayIP = "192.168.64.2"
+		}
 	}
 
 	return &DockerPortWatcher{
@@ -262,20 +266,6 @@ func (w *DockerPortWatcher) handleContainerStart(containerID string) {
 		return
 	}
 
-	// Resolve target IP
-	targetIP := inspect.NetworkSettings.IPAddress
-	if targetIP == "" {
-		for _, netCfg := range inspect.NetworkSettings.Networks {
-			if netCfg.IPAddress != "" {
-				targetIP = netCfg.IPAddress
-				break
-			}
-		}
-	}
-	if targetIP == "" {
-		targetIP = w.gatewayIP
-	}
-
 	// Port mappings
 	ports := inspect.NetworkSettings.Ports
 	if len(ports) == 0 {
@@ -286,10 +276,6 @@ func (w *DockerPortWatcher) handleContainerStart(containerID string) {
 	for portKey, bindings := range ports {
 		parts := strings.Split(portKey, "/")
 		if len(parts) == 0 {
-			continue
-		}
-		targetPort, err := strconv.Atoi(parts[0])
-		if err != nil {
 			continue
 		}
 		proto := "tcp"
@@ -310,6 +296,10 @@ func (w *DockerPortWatcher) handleContainerStart(containerID string) {
 				hostIP = "127.0.0.1"
 			}
 
+			// Destination must be the Linux guest VM IP at binding.HostPort
+			targetIP := w.gatewayIP
+			targetPort := hostPort
+
 			if err := w.forwarder.ForwardTCP(hostIP, hostPort, targetIP, targetPort); err == nil {
 				rule := ForwardRule{
 					Protocol:   proto,
@@ -328,7 +318,7 @@ func (w *DockerPortWatcher) handleContainerStart(containerID string) {
 		w.containerRules[containerID] = append(w.containerRules[containerID], registered...)
 		w.mu.Unlock()
 		log.Printf("[orb-netd:docker] Forwarded %d ports for container %s (target: %s)",
-			len(registered), containerID[:min(12, len(containerID))], targetIP)
+			len(registered), containerID[:min(12, len(containerID))], w.gatewayIP)
 	}
 }
 
