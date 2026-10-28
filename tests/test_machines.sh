@@ -14,22 +14,52 @@ mkdir -p "$BUILD_DIR"
 echo "=== [TEST] Building orbctl binary ==="
 go build -o "$ORBCTL" "$REPO_ROOT/src/host/cli/"
 
+DATA_DIR="${HOME}/.aerostack/data/machines"
+rm -rf "$DATA_DIR/test-ci-ubuntu" "$DATA_DIR/test-ci-ubuntu-clone" "$DATA_DIR/._test-ci-ubuntu"* 2>/dev/null || true
+
+VMD_PID=$(pgrep -f "orb-vmd" | head -n 1 || true)
+STARTED_VMD=0
+
+if [ -z "$VMD_PID" ]; then
+    echo "--> Starting orb-vmd --no-boot for machine lifecycle test..."
+    mkdir -p "${HOME}/.aerostack/run"
+    "$BUILD_DIR/orb-vmd" --no-boot >/tmp/orb-vmd-test-machines.log 2>&1 &
+    VMD_PID=$!
+    STARTED_VMD=1
+    for i in $(seq 1 40); do
+        if [ -S "$HOME/.aerostack/run/vmcontrol.sock" ]; then
+            break
+        fi
+        sleep 0.25
+    done
+fi
+
+cleanup() {
+    "$ORBCTL" stop test-ci-ubuntu 2>/dev/null || true
+    "$ORBCTL" delete test-ci-ubuntu 2>/dev/null || true
+    "$ORBCTL" delete test-ci-ubuntu-clone 2>/dev/null || true
+    rm -rf "$DATA_DIR/test-ci-ubuntu" "$DATA_DIR/test-ci-ubuntu-clone" "$DATA_DIR/._test-ci-ubuntu"* 2>/dev/null || true
+    if [ "$STARTED_VMD" -eq 1 ]; then
+        kill -15 "$VMD_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
 echo "=== [TEST] 1. Creating Real Ubuntu Machine (test-ci-ubuntu) ==="
 "$ORBCTL" create ubuntu:24.04 test-ci-ubuntu
 
-DATA_DIR="${HOME}/.aerostack/data/machines"
 if [ ! -d "$DATA_DIR/test-ci-ubuntu" ]; then
     echo "FAIL: Machine directory was not created at $DATA_DIR/test-ci-ubuntu"
     exit 1
 fi
 
-if [ ! -f "$DATA_DIR/test-ci-ubuntu/rootfs.img" ]; then
-    echo "FAIL: Machine rootfs.img missing"
+if [ ! -f "$DATA_DIR/test-ci-ubuntu/rootfs.img" ] && [ ! -f "$DATA_DIR/test-ci-ubuntu/rootfs.ext4" ]; then
+    echo "FAIL: Machine rootfs missing"
     exit 1
 fi
 
-if [ ! -f "$DATA_DIR/test-ci-ubuntu/metadata.json" ]; then
-    echo "FAIL: Machine metadata.json missing"
+if [ ! -f "$DATA_DIR/test-ci-ubuntu/metadata.json" ] && [ ! -f "$DATA_DIR/test-ci-ubuntu/machine.json" ]; then
+    echo "FAIL: Machine metadata missing"
     exit 1
 fi
 echo "PASSED: Verified disk image and metadata persistence"
@@ -51,7 +81,7 @@ echo "PASSED: Machine transitioned to RUNNING"
 
 echo "=== [TEST] 3. Cloning Machine via CoW clonefile (test-ci-ubuntu -> test-ci-ubuntu-clone) ==="
 "$ORBCTL" clone test-ci-ubuntu test-ci-ubuntu-clone
-if [ ! -f "$DATA_DIR/test-ci-ubuntu-clone/rootfs.img" ]; then
+if [ ! -f "$DATA_DIR/test-ci-ubuntu-clone/rootfs.img" ] && [ ! -f "$DATA_DIR/test-ci-ubuntu-clone/rootfs.ext4" ]; then
     echo "FAIL: Cloned disk missing"
     exit 1
 fi

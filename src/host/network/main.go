@@ -15,6 +15,9 @@ import (
 const NetdVersion = "1.0.0"
 
 func main() {
+	homeDir, _ := os.UserHomeDir()
+	defaultDockerSock := filepath.Join(homeDir, ".aerostack", "run", "docker.sock")
+	dockerSock := flag.String("docker-sock", defaultDockerSock, "Path to Docker unix domain socket to watch for container published ports")
 	dnsBind := flag.String("dns-bind", "127.0.0.1:5354", "Address and port for embedded RFC 1035 DNS server")
 	upstreamDNS := flag.String("upstream-dns", "1.1.1.1:53", "Upstream DNS resolver for non-.orb.local queries")
 	routerIP := flag.String("router-ip", "192.168.128.1", "IPv4 address for userspace router gateway")
@@ -79,10 +82,13 @@ func main() {
 		log.Printf("[orb-netd:dns] RFC 1035 DNS server active on %s (handling *.orb.local and *.aerostack.local)", *dnsBind)
 	}
 
-	// 3. Initialize Userspace Port Forwarder
+	// 3. Initialize Userspace Port Forwarder and Docker Event Watcher
 	portForwarder := NewPortForwarder()
 	portForwarder.Start()
 	log.Printf("[orb-netd:forward] Userspace dynamic port forwarding active")
+
+	dockerWatcher := NewDockerPortWatcher(*dockerSock, portForwarder, *routerIP)
+	dockerWatcher.Start()
 
 	// 4. Initialize Bonjour mDNS Advertiser
 	var mdns *MDNSAdvertiser
@@ -104,6 +110,7 @@ func main() {
 	sig := <-sigCh
 	log.Printf("[orb-netd] Received signal %v, terminating engine...", sig)
 
+	dockerWatcher.Stop()
 	portForwarder.Stop()
 
 	if mdns != nil {

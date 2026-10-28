@@ -39,23 +39,26 @@ func main() {
 	Execute()
 }
 
-// Execute runs the root command with orb shortcut handling
+const CLIVersion = "1.0.0"
+
+// Execute runs the root command with aerostack / orb shortcut handling
 func Execute() {
 	progName := filepath.Base(os.Args[0])
-	if progName == "orb" {
+	if progName == "orb" || progName == "aerostack" || progName == "orbctl" {
 		knownSubcommands := map[string]bool{
 			"create": true, "list": true, "ls": true, "ps": true,
 			"run": true, "exec": true, "shell": true,
-			"start": true, "stop": true, "delete": true, "rm": true,
+			"start": true, "stop": true, "restart": true, "delete": true, "rm": true,
 			"clone": true, "top": true, "doctor": true, "config": true,
 			"status": true, "ssh": true, "help": true, "--help": true, "-h": true,
 			"version": true, "--version": true, "-v": true,
+			"machine": true, "setup-cli": true,
 		}
 
 		if len(os.Args) > 1 {
 			firstArg := os.Args[1]
-			if !knownSubcommands[firstArg] && !strings.HasPrefix(firstArg, "-") {
-				// Prepend "run" subcommand for direct command execution (e.g. `orb uname -a`)
+			if (progName == "orb" || progName == "aerostack") && !knownSubcommands[firstArg] && !strings.HasPrefix(firstArg, "-") {
+				// Prepend "run" subcommand for direct command execution (e.g. `orb uname -a` or `aerostack uname -a`)
 				newArgs := append([]string{os.Args[0], "run"}, os.Args[1:]...)
 				os.Args = newArgs
 			}
@@ -71,16 +74,18 @@ func Execute() {
 // NewRootCmd builds the Cobra command hierarchy
 func NewRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
-		Use:   "orbctl [command]",
-		Short: "Use and manage OrbStack and its machines",
-		Long: `Use and manage OrbStack and its machines.
+		Use:     "aerostack [command]",
+		Aliases: []string{"orb", "orbctl"},
+		Short:   "Use and manage AeroStack and its machines",
+		Long: `Use and manage AeroStack and its machines.
 
-The listed commands can be used with either "orbctl" or "orb".
+The commands can be used with "aerostack", "orbctl", or "orb".
 
-You can also prefix commands with "orb" to run them on Linux. For example:
-    orb uname -a
+You can also prefix commands with "aerostack" or "orb" to run them on Linux. For example:
+    aerostack uname -a
 will run "uname -a" on Linux, and is equivalent to:
-    orbctl run uname -a`,
+    aerostack run uname -a`,
+		SilenceUsage: true,
 	}
 
 	rootCmd.PersistentFlags().StringVar(&socketPath, "socket", getControlSocketPath(), "Control socket path")
@@ -91,12 +96,16 @@ will run "uname -a" on Linux, and is equivalent to:
 	rootCmd.AddCommand(newSSHCmd())
 	rootCmd.AddCommand(newStartCmd())
 	rootCmd.AddCommand(newStopCmd())
+	rootCmd.AddCommand(newRestartCmd())
 	rootCmd.AddCommand(newDeleteCmd())
 	rootCmd.AddCommand(newCloneCmd())
 	rootCmd.AddCommand(newTopCmd())
 	rootCmd.AddCommand(newDoctorCmd())
 	rootCmd.AddCommand(newConfigCmd())
 	rootCmd.AddCommand(newStatusCmd())
+	rootCmd.AddCommand(newVersionCmd())
+	rootCmd.AddCommand(newMachineCmd())
+	rootCmd.AddCommand(newSetupCLICmd())
 
 	return rootCmd
 }
@@ -107,7 +116,11 @@ func getControlSocketPath() string {
 	if _, err := os.Stat(aeroSock); err == nil {
 		return aeroSock
 	}
-	return filepath.Join(home, ".orbstack", "run", "vmcontrol.sock")
+	orbSock := filepath.Join(home, ".orbstack", "run", "vmcontrol.sock")
+	if _, err := os.Stat(orbSock); err == nil {
+		return orbSock
+	}
+	return aeroSock
 }
 
 // MARK: - JSON-RPC Client
@@ -407,10 +420,22 @@ func newRunCmd() *cobra.Command {
 
 			addr := execAddrFlag
 			if addr == "" {
-				addr = "127.0.0.1:8022"
+				home, _ := os.UserHomeDir()
+				execSock := filepath.Join(home, ".aerostack", "run", "exec.sock")
+				if _, err := os.Stat(execSock); err == nil {
+					addr = execSock
+				} else {
+					addr = "127.0.0.1:8022"
+				}
 			}
-			// Connect to direct exec agent
-			conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+			// Connect to direct exec agent (support both Unix domain socket and TCP)
+			var conn net.Conn
+			var err error
+			if strings.HasPrefix(addr, "/") || strings.HasSuffix(addr, ".sock") {
+				conn, err = net.DialTimeout("unix", addr, 2*time.Second)
+			} else {
+				conn, err = net.DialTimeout("tcp", addr, 2*time.Second)
+			}
 			if err != nil {
 				return fmt.Errorf("failed to connect to execution server on %s: %w (ensure microVM is running)", addr, err)
 			}
@@ -553,7 +578,7 @@ func newSSHCmd() *cobra.Command {
 func newStartCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "start [machine]",
-		Short: "Start OrbStack or a machine",
+		Short: "Start AeroStack or a machine",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := "ubuntu"
 			if len(args) > 0 {
@@ -563,10 +588,7 @@ func newStartCmd() *cobra.Command {
 			client := newRPCClient(socketPath)
 			var success bool
 			if err := client.Call("vm.start", map[string]interface{}{"name": name}, &success); err != nil {
-				mgr := mach.NewManager("", "")
-				if mErr := mgr.StartMachine(name); mErr != nil {
-					return fmt.Errorf("failed to start machine: %w", mErr)
-				}
+				return fmt.Errorf("failed to start machine %s: %w", name, err)
 			}
 			fmt.Printf("%s is running.\n", name)
 			return nil
@@ -577,7 +599,7 @@ func newStartCmd() *cobra.Command {
 func newStopCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop [machine]",
-		Short: "Stop OrbStack or a machine",
+		Short: "Stop AeroStack or a machine",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := "ubuntu"
 			if len(args) > 0 {
@@ -587,15 +609,128 @@ func newStopCmd() *cobra.Command {
 			client := newRPCClient(socketPath)
 			var success bool
 			if err := client.Call("vm.stop", map[string]interface{}{"name": name}, &success); err != nil {
-				mgr := mach.NewManager("", "")
-				if mErr := mgr.StopMachine(name); mErr != nil {
-					return fmt.Errorf("failed to stop machine: %w", mErr)
-				}
+				return fmt.Errorf("failed to stop machine %s: %w", name, err)
 			}
 			fmt.Printf("%s stopped.\n", name)
 			return nil
 		},
 	}
+}
+
+func newRestartCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "restart [machine]",
+		Short: "Restart AeroStack or a machine",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := "ubuntu"
+			if len(args) > 0 {
+				name = args[0]
+			}
+			fmt.Printf("Restarting %s...\n", name)
+			client := newRPCClient(socketPath)
+			var success bool
+			if err := client.Call("vm.stop", map[string]interface{}{"name": name}, &success); err != nil {
+				return fmt.Errorf("failed to stop machine %s during restart: %w", name, err)
+			}
+			if err := client.Call("vm.start", map[string]interface{}{"name": name}, &success); err != nil {
+				return fmt.Errorf("failed to start machine %s during restart: %w", name, err)
+			}
+			fmt.Printf("%s restarted.\n", name)
+			return nil
+		},
+	}
+}
+
+func newVersionCmd() *cobra.Command {
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "version",
+		Short: "Show AeroStack version information",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if jsonOutput || outputJSON {
+				info := map[string]string{
+					"version": CLIVersion,
+					"commit":  "stream1-final",
+					"arch":    "arm64",
+				}
+				data, _ := json.MarshalIndent(info, "", "  ")
+				cmd.Println(string(data))
+				return nil
+			}
+			cmd.Printf("AeroStack version %s\n", CLIVersion)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVarP(&jsonOutput, "format-json", "j", false, "Output in JSON format")
+	return cmd
+}
+
+func newMachineCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "machine",
+		Aliases: []string{"m"},
+		Short:   "Manage microVM machines",
+	}
+
+	cmd.AddCommand(newListCmd())
+	cmd.AddCommand(newCreateCmd())
+	cmd.AddCommand(newStartCmd())
+	cmd.AddCommand(newStopCmd())
+	cmd.AddCommand(newRestartCmd())
+	cmd.AddCommand(newDeleteCmd())
+	cmd.AddCommand(newCloneCmd())
+	cmd.AddCommand(newStatusCmd())
+	cmd.AddCommand(newSSHCmd())
+
+	return cmd
+}
+
+func newSetupCLICmd() *cobra.Command {
+	var targetDir string
+	cmd := &cobra.Command{
+		Use:   "setup-cli",
+		Short: "Set up symlinks for AeroStack CLI tools",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			exePath, err := os.Executable()
+			if err != nil {
+				return fmt.Errorf("unable to determine executable path: %w", err)
+			}
+			exePath, err = filepath.EvalSymlinks(exePath)
+			if err != nil {
+				return fmt.Errorf("unable to resolve executable symlink: %w", err)
+			}
+
+			destDir := targetDir
+			if destDir == "" {
+				destDir = "/usr/local/bin"
+				testFile := filepath.Join(destDir, ".aerostack_test_write")
+				if err := os.WriteFile(testFile, []byte(""), 0o644); err != nil {
+					home, _ := os.UserHomeDir()
+					destDir = filepath.Join(home, ".local", "bin")
+				} else {
+					_ = os.Remove(testFile)
+				}
+			}
+
+			if err := os.MkdirAll(destDir, 0o755); err != nil {
+				return fmt.Errorf("failed to create directory %s: %w", destDir, err)
+			}
+
+			names := []string{"aerostack", "orbctl", "orb"}
+			for _, name := range names {
+				linkPath := filepath.Join(destDir, name)
+				_ = os.Remove(linkPath)
+				if err := os.Symlink(exePath, linkPath); err != nil {
+					return fmt.Errorf("failed to symlink %s -> %s: %w", linkPath, exePath, err)
+				}
+				cmd.Printf("Created symlink: %s -> %s\n", linkPath, exePath)
+			}
+			cmd.Printf("AeroStack CLI successfully configured in %s\n", destDir)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&targetDir, "dest", "", "Destination directory for symlinks (default: /usr/local/bin or ~/.local/bin)")
+	return cmd
 }
 
 func newDeleteCmd() *cobra.Command {
@@ -875,6 +1010,7 @@ func newStatusCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&outputJSON, "format-json", "j", false, "Output in JSON format")
 	return cmd
 }
+
 
 func queryMachines() ([]MachineDTO, error) {
 	client := newRPCClient(socketPath)

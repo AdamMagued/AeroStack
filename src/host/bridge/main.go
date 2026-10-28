@@ -15,16 +15,18 @@ const BridgeVersion = "1.0.0"
 
 func main() {
 	homeDir, _ := os.UserHomeDir()
-	defaultUserSock := filepath.Join(homeDir, ".orbstack", "run", "docker.sock")
-	defaultSockets := fmt.Sprintf("/var/run/docker.sock,%s", defaultUserSock)
+	aeroUserSock := filepath.Join(homeDir, ".aerostack", "run", "docker.sock")
+	orbUserSock := filepath.Join(homeDir, ".orbstack", "run", "docker.sock")
+	defaultSockets := fmt.Sprintf("%s,%s,/var/run/docker.sock", aeroUserSock, orbUserSock)
+	defaultBackendSock := filepath.Join(homeDir, ".aerostack", "run", "docker_backend.sock")
 
 	socketsFlag := flag.String("sockets", defaultSockets, "Comma-separated Unix socket paths to listen on")
-	backendMode := flag.String("backend-mode", "vsock", "Backend transport: vsock, tcp, unix")
-	backendSocket := flag.String("backend-socket", "/tmp/orb_dockerd.sock", "Backend Unix socket (if unix mode)")
+	backendMode := flag.String("backend-mode", "unix", "Backend transport: unix, vsock, tcp")
+	backendSocket := flag.String("backend-socket", defaultBackendSock, "Backend Unix socket (if unix mode)")
 	backendTCP := flag.String("backend-tcp", "127.0.0.1:2375", "Backend TCP address (if tcp mode)")
 	vsockCID := flag.Uint("vsock-cid", 3, "Guest VM vsock CID (if vsock mode)")
 	vsockPort := flag.Uint("vsock-port", 2375, "Guest dockerd vsock port (if vsock mode)")
-	mountPrefix := flag.String("mount-prefix", "/mnt/mac", "VirtioFS guest mount prefix for host filesystem")
+	mountPrefix := flag.String("mount-prefix", "/workspace", "VirtioFS guest mount prefix for host filesystem")
 	versionFlag := flag.Bool("version", false, "Print bridge version and exit")
 	flag.Parse()
 

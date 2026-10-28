@@ -49,6 +49,18 @@ echo "--> 6. Running Docker Compose Multi-Container Stack Tests..."
 echo "--> 7. Running Mach Physical Memory Footprint Verification..."
 "$REPO_ROOT/tests/test_memory_footprint.sh"
 
+# 9. Host Bind Mounts Path Translation Verification
+echo "--> 8. Running Host Bind Mounts Translation Tests..."
+"$REPO_ROOT/tests/test_bind_mounts.sh"
+
+# 10. Host vsock Exec Bridge Verification
+echo "--> 9. Running Host vsock Exec Bridge Tests..."
+"$REPO_ROOT/tests/test_exec_bridge.sh"
+
+# 11. Container Port Forwarding Verification
+echo "--> 10. Running Container Port Forwarding Tests..."
+"$REPO_ROOT/tests/test_port_forwarding.sh"
+
 echo "======================================================================"
 echo " ALL TESTS PASSED: 100% Empirically Verified & Production Hardened"
 echo "======================================================================"

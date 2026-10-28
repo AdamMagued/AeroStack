@@ -531,3 +531,179 @@ func TestCLI_OrbShortcutLogic(t *testing.T) {
 		t.Fatalf("Shortcut prepending failed: %v", os.Args)
 	}
 }
+
+func TestCLI_Version(t *testing.T) {
+	cmd := NewRootCmd()
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{"version"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("version failed: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "AeroStack version") || !strings.Contains(out, CLIVersion) {
+		t.Fatalf("unexpected version output: %s", out)
+	}
+
+	// Test JSON format
+	cmd = NewRootCmd()
+	buf.Reset()
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{"version", "-j"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("version -j failed: %v", err)
+	}
+	var res map[string]string
+	if err := json.Unmarshal(buf.Bytes(), &res); err != nil {
+		t.Fatalf("failed to parse version json: %v, out: %s", err, buf.String())
+	}
+	if res["version"] != CLIVersion {
+		t.Fatalf("expected version %s, got %s", CLIVersion, res["version"])
+	}
+}
+
+func TestCLI_Restart(t *testing.T) {
+	ts := startTestRPCServer(t)
+	defer ts.Close()
+
+	cmd := NewRootCmd()
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{"--socket", ts.sockPath, "restart", "ubuntu"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("restart failed: %v", err)
+	}
+
+	ts.mu.Lock()
+	state := ts.machines["ubuntu"].State
+	ts.mu.Unlock()
+	if state != "RUNNING" {
+		t.Fatalf("expected machine to be RUNNING after restart, got: %s", state)
+	}
+}
+
+func TestCLI_MachineSubcommands(t *testing.T) {
+	ts := startTestRPCServer(t)
+	defer ts.Close()
+
+	// 1. machine list
+	cmd := NewRootCmd()
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{"--socket", ts.sockPath, "machine", "list", "-j"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("machine list failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "ubuntu") {
+		t.Fatalf("expected ubuntu in machine list: %s", buf.String())
+	}
+
+	// 2. machine stop
+	cmd = NewRootCmd()
+	buf.Reset()
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{"--socket", ts.sockPath, "machine", "stop", "ubuntu"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("machine stop failed: %v", err)
+	}
+	ts.mu.Lock()
+	if ts.machines["ubuntu"].State != "STOPPED" {
+		t.Fatalf("expected ubuntu to be STOPPED")
+	}
+	ts.mu.Unlock()
+
+	// 3. machine start
+	cmd = NewRootCmd()
+	buf.Reset()
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{"--socket", ts.sockPath, "machine", "start", "ubuntu"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("machine start failed: %v", err)
+	}
+	ts.mu.Lock()
+	if ts.machines["ubuntu"].State != "RUNNING" {
+		t.Fatalf("expected ubuntu to be RUNNING")
+	}
+	ts.mu.Unlock()
+
+	// 4. machine restart
+	cmd = NewRootCmd()
+	buf.Reset()
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{"--socket", ts.sockPath, "machine", "restart", "ubuntu"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("machine restart failed: %v", err)
+	}
+}
+
+func TestCLI_SetupCLI(t *testing.T) {
+	tmpDir, err := os.MkdirTemp(os.TempDir(), "setup_cli_test_*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cmd := NewRootCmd()
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{"setup-cli", "--dest", tmpDir})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("setup-cli failed: %v", err)
+	}
+
+	for _, name := range []string{"aerostack", "orbctl", "orb"} {
+		link := filepath.Join(tmpDir, name)
+		fi, err := os.Lstat(link)
+		if err != nil {
+			t.Fatalf("expected symlink %s to exist: %v", link, err)
+		}
+		if (fi.Mode() & os.ModeSymlink) == 0 {
+			t.Fatalf("expected %s to be a symlink", link)
+		}
+	}
+}
+
+func TestCLI_OfflineErrorHandling(t *testing.T) {
+	nonExistentSock := "/tmp/aerostack_nonexistent_test.sock"
+	_ = os.Remove(nonExistentSock)
+
+	// Test start fails cleanly
+	cmd := NewRootCmd()
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{"--socket", nonExistentSock, "start", "ubuntu"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected start to fail when daemon is offline")
+	}
+	if !strings.Contains(err.Error(), "daemon is not running") && !strings.Contains(err.Error(), "failed to start machine") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	// Test stop fails cleanly
+	cmd = NewRootCmd()
+	buf.Reset()
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetArgs([]string{"--socket", nonExistentSock, "stop", "ubuntu"})
+	err = cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected stop to fail when daemon is offline")
+	}
+	if !strings.Contains(err.Error(), "daemon is not running") && !strings.Contains(err.Error(), "failed to stop machine") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+

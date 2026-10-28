@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import AppKit
 import OrbEngine
 
 @main
@@ -127,7 +128,7 @@ struct OrbVMDMain {
             memoryBytes: memoryMB * 1024 * 1024,
             kernelURL: URL(fileURLWithPath: kernelPath),
             initrdURL: URL(fileURLWithPath: initrdPath),
-            kernelCommandLine: "console=hvc0 root=/dev/vda rw rootflags=rw rootfstype=ext4 init=/sbin/init",
+            kernelCommandLine: "console=hvc0 root=/dev/vda rw rootflags=rw,discard rootfstype=ext4 init=/sbin/init",
             diskConfigs: [
                 VMDiskConfig(imageURL: URL(fileURLWithPath: rootfsPath), isReadOnly: false, cacheSync: true)
             ],
@@ -184,27 +185,141 @@ struct OrbVMDMain {
             }
         }
 
-        // 8. Bind Docker socket bridge
+        // 8. Bind Docker vsock backend & Exec bridge
+        let backendDockerSocket = ("~/.aerostack/run/docker_backend.sock" as NSString).expandingTildeInPath
         do {
-            try vsockRouter.startDockerSocketProxy(unixSocketPath: dockerSocketPath)
-            print("[DOCKER] Docker socket bridge listening on: \(dockerSocketPath)")
+            try vsockRouter.startDockerSocketProxy(unixSocketPath: backendDockerSocket)
+            print("[DOCKER] Raw Docker vsock backend listening on: \(backendDockerSocket)")
         } catch {
-            print("[DOCKER] ERROR: Failed to bind Docker socket bridge: \(error)")
+            print("[DOCKER] ERROR: Failed to bind Docker vsock backend: \(error)")
+        }
+
+        let execSocketPath = ("~/.aerostack/run/exec.sock" as NSString).expandingTildeInPath
+        do {
+            try vsockRouter.startExecBridge(tcpPort: 8022, unixSocketPath: execSocketPath)
+            print("[EXEC] Host vsock exec bridge listening on 127.0.0.1:8022 and \(execSocketPath)")
+        } catch {
+            print("[EXEC] ERROR: Failed to bind exec bridge: \(error)")
+        }
+
+        // 9. Spawn managed helper daemons (orb-docker-bridge and orb-netd)
+        if let bridgeBin = resolveBinaryPath(name: "orb-docker-bridge") {
+            let bridgeArgs = [
+                "--backend-mode", "unix",
+                "--backend-socket", backendDockerSocket,
+                "--sockets", "\(dockerSocketPath),/var/run/docker.sock",
+                "--mount-prefix", "/workspace"
+            ]
+            if let p = spawnSubprocess(binaryPath: bridgeBin, arguments: bridgeArgs) {
+                print("[ENGINE] Spawned orb-docker-bridge (PID: \(p.processIdentifier))")
+            }
+        } else {
+            do {
+                try vsockRouter.startDockerSocketProxy(unixSocketPath: dockerSocketPath)
+                print("[DOCKER] Fallback: Direct Docker socket bridge listening on: \(dockerSocketPath)")
+            } catch {
+                print("[DOCKER] Warning: Direct Docker bridge failed: \(error)")
+            }
+        }
+
+        if let netdBin = resolveBinaryPath(name: "orb-netd") {
+            let netdArgs = [
+                "--docker-sock", dockerSocketPath
+            ]
+            if let p = spawnSubprocess(binaryPath: netdBin, arguments: netdArgs) {
+                print("[ENGINE] Spawned orb-netd (PID: \(p.processIdentifier))")
+            }
+        }
+
+        // 10. macOS Wake Notification Observer for Guest Clock Synchronization
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            print("[ENGINE] macOS wake detected (NSWorkspace.didWakeNotification). Triggering guest clock sync...")
+            Task {
+                await Self.resyncGuestClock(vsockRouter: vsockRouter)
+            }
         }
 
         // Signal handlers for graceful termination
         signal(SIGINT) { _ in
             print("\n[DAEMON] Caught SIGINT. Shutting down gracefully...")
+            for p in OrbVMDMain.childProcesses {
+                p.terminate()
+            }
             exit(0)
         }
         signal(SIGTERM) { _ in
             print("\n[DAEMON] Caught SIGTERM. Shutting down gracefully...")
+            for p in OrbVMDMain.childProcesses {
+                p.terminate()
+            }
             exit(0)
         }
 
         print("[ENGINE] AeroStack host engine daemon is RUNNING and ready.")
         while true {
             try? await Task.sleep(nanoseconds: 3600 * 1_000_000_000)
+        }
+    }
+
+    private static func resyncGuestClock(vsockRouter: VsockRouter) async {
+        do {
+            let conn = try await vsockRouter.connectToGuest(port: VsockRouter.execPort, retries: 3, delaySeconds: 0.5)
+            let fd = conn.fileDescriptor
+            defer { Darwin.close(fd) }
+
+            let req: [String: Any] = [
+                "command": ["hwclock", "-s"],
+                "machine": "default"
+            ]
+            let json = try JSONSerialization.data(withJSONObject: req)
+            var packet = Data()
+            packet.append(UInt8(1)) // ExecMsgRequest = 1
+            var len = UInt32(json.count).bigEndian
+            packet.append(Data(bytes: &len, count: 4))
+            packet.append(json)
+
+            _ = packet.withUnsafeBytes { raw in
+                Darwin.write(fd, raw.baseAddress, raw.count)
+            }
+            print("[ENGINE] Guest clock resynchronization command ('hwclock -s') dispatched successfully.")
+        } catch {
+            print("[ENGINE] Warning: Could not resync guest clock: \(error)")
+        }
+    }
+
+    nonisolated(unsafe) static var childProcesses: [Process] = []
+
+    private static func resolveBinaryPath(name: String) -> String? {
+        let fm = FileManager.default
+        let candidates = [
+            "/Volumes/AdamSSD/antigravity_workspace/orbstack_free/build/\(name)",
+            Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent(name).path,
+            "/usr/local/bin/\(name)"
+        ]
+        for c in candidates {
+            if fm.fileExists(atPath: c) {
+                return c
+            }
+        }
+        return nil
+    }
+
+    private static func spawnSubprocess(binaryPath: String, arguments: [String]) -> Process? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: binaryPath)
+        p.arguments = arguments
+        p.environment = ProcessInfo.processInfo.environment
+        do {
+            try p.run()
+            childProcesses.append(p)
+            return p
+        } catch {
+            print("[ENGINE] Warning: Failed to spawn \(binaryPath): \(error)")
+            return nil
         }
     }
 

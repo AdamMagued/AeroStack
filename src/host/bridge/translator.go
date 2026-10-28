@@ -30,12 +30,25 @@ func NewPathTranslator(guestPrefix string) *PathTranslator {
 		guestPrefix = "/"
 	}
 
-	return &PathTranslator{
-		HostPrefix:      "/",
+	hostPrefix := "/"
+	if guestPrefix == "/workspace" {
+		hostPrefix = "/Volumes/AdamSSD/antigravity_workspace"
+	}
+
+	pt := &PathTranslator{
+		HostPrefix:      hostPrefix,
 		GuestPrefix:     guestPrefix,
 		CustomMappings:  make(map[string]string),
 		ReverseMappings: make(map[string]string),
 	}
+
+	if guestPrefix == "/workspace" {
+		pt.AddMapping("/Volumes/AdamSSD/antigravity_workspace", "/workspace")
+		pt.AddMapping("/Volumes/AdamSSD", "/workspace")
+		pt.AddMapping("/Users", "/mnt/mac/Users")
+	}
+
+	return pt
 }
 
 // AddMapping registers an explicit mount mapping (e.g., host /Volumes/SSD -> guest /mnt/ssd)
@@ -43,7 +56,9 @@ func (pt *PathTranslator) AddMapping(hostPath, guestPath string) {
 	cleanHost := filepath.Clean(hostPath)
 	cleanGuest := filepath.Clean(guestPath)
 	pt.CustomMappings[cleanHost] = cleanGuest
-	pt.ReverseMappings[cleanGuest] = cleanHost
+	if existing, ok := pt.ReverseMappings[cleanGuest]; !ok || len(cleanHost) > len(existing) {
+		pt.ReverseMappings[cleanGuest] = cleanHost
+	}
 }
 
 // HostToGuest translates a macOS host path to Linux VM VirtioFS path.
@@ -55,15 +70,23 @@ func (pt *PathTranslator) HostToGuest(hostPath string) string {
 		return clean
 	}
 
-	// 1. Check explicit custom mappings
+	// 1. Check explicit custom mappings (prioritizing longest prefix match)
+	var bestHostKey string
+	var bestGuestVal string
 	for hostKey, guestVal := range pt.CustomMappings {
-		if clean == hostKey {
-			return guestVal
+		if clean == hostKey || strings.HasPrefix(clean, hostKey+"/") {
+			if len(hostKey) > len(bestHostKey) {
+				bestHostKey = hostKey
+				bestGuestVal = guestVal
+			}
 		}
-		if strings.HasPrefix(clean, hostKey+"/") {
-			rel := strings.TrimPrefix(clean, hostKey)
-			return filepath.Join(guestVal, rel)
+	}
+	if bestHostKey != "" {
+		if clean == bestHostKey {
+			return bestGuestVal
 		}
+		rel := strings.TrimPrefix(clean, bestHostKey)
+		return filepath.Join(bestGuestVal, rel)
 	}
 
 	// 2. Direct 1:1 mirroring mode
@@ -84,15 +107,23 @@ func (pt *PathTranslator) GuestToHost(guestPath string) string {
 		return clean
 	}
 
-	// 1. Check explicit custom reverse mappings
+	// 1. Check explicit custom reverse mappings (prioritizing longest prefix match)
+	var bestGuestKey string
+	var bestHostVal string
 	for guestKey, hostVal := range pt.ReverseMappings {
-		if clean == guestKey {
-			return hostVal
+		if clean == guestKey || strings.HasPrefix(clean, guestKey+"/") {
+			if len(guestKey) > len(bestGuestKey) {
+				bestGuestKey = guestKey
+				bestHostVal = hostVal
+			}
 		}
-		if strings.HasPrefix(clean, guestKey+"/") {
-			rel := strings.TrimPrefix(clean, guestKey)
-			return filepath.Join(hostVal, rel)
+	}
+	if bestGuestKey != "" {
+		if clean == bestGuestKey {
+			return bestHostVal
 		}
+		rel := strings.TrimPrefix(clean, bestGuestKey)
+		return filepath.Join(bestHostVal, rel)
 	}
 
 	// 2. Direct 1:1 mirroring mode
@@ -103,10 +134,13 @@ func (pt *PathTranslator) GuestToHost(guestPath string) string {
 	// 3. Prefix reverse translation: strip GuestPrefix
 	if strings.HasPrefix(clean, pt.GuestPrefix) {
 		rel := strings.TrimPrefix(clean, pt.GuestPrefix)
-		if !strings.HasPrefix(rel, "/") {
-			rel = "/" + rel
+		if pt.HostPrefix == "/" {
+			if !strings.HasPrefix(rel, "/") {
+				rel = "/" + rel
+			}
+			return filepath.Clean(rel)
 		}
-		return filepath.Clean(rel)
+		return filepath.Join(pt.HostPrefix, rel)
 	}
 
 	return clean
@@ -142,38 +176,49 @@ func (pt *PathTranslator) TranslateContainerCreateRequestBody(body []byte) ([]by
 		return nil, fmt.Errorf("failed to unmarshal container create json: %w", err)
 	}
 
-	hostConfigRaw, ok := root["HostConfig"]
-	if !ok || hostConfigRaw == nil {
-		return body, nil
-	}
-
-	hostConfig, ok := hostConfigRaw.(map[string]interface{})
-	if !ok {
-		return body, nil
-	}
-
-	// 1. Rewrite Binds: ["/host:/guest[:ro]"]
-	if bindsRaw, ok := hostConfig["Binds"]; ok && bindsRaw != nil {
-		if bindsSlice, ok := bindsRaw.([]interface{}); ok {
-			newBinds := make([]string, 0, len(bindsSlice))
-			for _, b := range bindsSlice {
-				if bindStr, ok := b.(string); ok {
-					newBinds = append(newBinds, pt.TranslateBindMount(bindStr, true))
-				}
-			}
-			hostConfig["Binds"] = newBinds
-		}
-	}
-
-	// 2. Rewrite Mounts: [{"Type": "bind", "Source": "...", "Target": "..."}]
-	if mountsRaw, ok := hostConfig["Mounts"]; ok && mountsRaw != nil {
-		if mountsSlice, ok := mountsRaw.([]interface{}); ok {
+	// 1. Rewrite top-level Mounts if present
+	if rootMountsRaw, ok := root["Mounts"]; ok && rootMountsRaw != nil {
+		if mountsSlice, ok := rootMountsRaw.([]interface{}); ok {
 			for _, m := range mountsSlice {
 				if mountMap, ok := m.(map[string]interface{}); ok {
 					mType, _ := mountMap["Type"].(string)
 					if mType == "bind" || mType == "" {
 						if source, ok := mountMap["Source"].(string); ok {
 							mountMap["Source"] = pt.HostToGuest(source)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	hostConfigRaw, ok := root["HostConfig"]
+	if ok && hostConfigRaw != nil {
+		if hostConfig, ok := hostConfigRaw.(map[string]interface{}); ok {
+			// Rewrite Binds: ["/host:/guest[:ro]"]
+			if bindsRaw, ok := hostConfig["Binds"]; ok && bindsRaw != nil {
+				if bindsSlice, ok := bindsRaw.([]interface{}); ok {
+					newBinds := make([]string, 0, len(bindsSlice))
+					for _, b := range bindsSlice {
+						if bindStr, ok := b.(string); ok {
+							newBinds = append(newBinds, pt.TranslateBindMount(bindStr, true))
+						}
+					}
+					hostConfig["Binds"] = newBinds
+				}
+			}
+
+			// Rewrite Mounts: [{"Type": "bind", "Source": "...", "Target": "..."}]
+			if mountsRaw, ok := hostConfig["Mounts"]; ok && mountsRaw != nil {
+				if mountsSlice, ok := mountsRaw.([]interface{}); ok {
+					for _, m := range mountsSlice {
+						if mountMap, ok := m.(map[string]interface{}); ok {
+							mType, _ := mountMap["Type"].(string)
+							if mType == "bind" || mType == "" {
+								if source, ok := mountMap["Source"].(string); ok {
+									mountMap["Source"] = pt.HostToGuest(source)
+								}
+							}
 						}
 					}
 				}

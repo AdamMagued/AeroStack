@@ -49,12 +49,15 @@ public final class OrbDaemonStore: ObservableObject {
     @Published public var doctorResults: [DoctorCheckResult] = []
     @Published public var isRunningDoctor: Bool = false
 
+    public static let shared = OrbDaemonStore()
+
     private let socketPath: String
-    private var timer: Timer?
+    private var pollingTask: Task<Void, Never>? = nil
     private var rpcCounter: Int = 1
     private var toastDismissTask: Task<Void, Never>? = nil
+    private var hasLoadedFromDisk: Bool = false
 
-    public init(socketPath: String = ("~/.orbstack/run/vmcontrol.sock" as NSString).expandingTildeInPath) {
+    public init(socketPath: String = ("~/.aerostack/run/vmcontrol.sock" as NSString).expandingTildeInPath) {
         self.socketPath = socketPath
         refreshAll()
         startPeriodicPolling()
@@ -70,17 +73,26 @@ public final class OrbDaemonStore: ObservableObject {
     }
 
     private func startPeriodicPolling() {
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.fetchMetrics()
-                self?.fetchMachines()
-                self?.fetchBalloonStats()
+        pollingTask?.cancel()
+        pollingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self = self else { break }
+                let intervalNanos: UInt64 = self.isConnected ? 1_000_000_000 : 5_000_000_000
+                try? await Task.sleep(nanoseconds: intervalNanos)
+                if Task.isCancelled { break }
+                self.pollCycle()
             }
         }
     }
 
+    private func pollCycle() {
+        fetchMetrics()
+        fetchMachines()
+        fetchBalloonStats()
+    }
+
     isolated deinit {
-        timer?.invalidate()
+        pollingTask?.cancel()
         toastDismissTask?.cancel()
     }
 
@@ -187,7 +199,9 @@ public final class OrbDaemonStore: ObservableObject {
                     self.errorMessage = nil
                 }
             } catch {
-                if !self.isConnected && self.machines.isEmpty {
+                self.isConnected = false
+                if self.machines.isEmpty && !self.hasLoadedFromDisk {
+                    self.hasLoadedFromDisk = true
                     loadFromDisk()
                 }
             }
@@ -199,13 +213,10 @@ public final class OrbDaemonStore: ObservableObject {
             do {
                 _ = try await sendRPC(method: "vm.start", params: ["name": .string(name)])
                 fetchMachines()
+                showToast(title: "Machine '\(name)' started", type: .success)
             } catch {
-                if let idx = machines.firstIndex(where: { $0.name == name }) {
-                    machines[idx].state = "RUNNING"
-                    machines[idx].ip_address = "192.168.138.2"
-                }
+                showToast(title: "Failed to start machine '\(name)'", subtitle: error.localizedDescription, type: .error)
             }
-            showToast(title: "Machine '\(name)' started", type: .success)
         }
     }
 
@@ -214,13 +225,10 @@ public final class OrbDaemonStore: ObservableObject {
             do {
                 _ = try await sendRPC(method: "vm.stop", params: ["name": .string(name)])
                 fetchMachines()
+                showToast(title: "Machine '\(name)' stopped", type: .info)
             } catch {
-                if let idx = machines.firstIndex(where: { $0.name == name }) {
-                    machines[idx].state = "STOPPED"
-                    machines[idx].ip_address = "-"
-                }
+                showToast(title: "Failed to stop machine '\(name)'", subtitle: error.localizedDescription, type: .error)
             }
-            showToast(title: "Machine '\(name)' stopped", type: .info)
         }
     }
 
@@ -229,22 +237,10 @@ public final class OrbDaemonStore: ObservableObject {
             do {
                 _ = try await sendRPC(method: "vm.create", params: ["name": .string(name), "distro": .string(distro)])
                 fetchMachines()
+                showToast(title: "Machine '\(name)' created", subtitle: "\(distro) microVM ready", type: .success)
             } catch {
-                let newVM = VMSummary(
-                    name: name,
-                    distro: distro,
-                    version: "latest",
-                    arch: "arm64",
-                    state: "STOPPED",
-                    cpus: settings.max_cpus,
-                    memory_mb: settings.max_memory_mb,
-                    ip_address: "-",
-                    size: "0 MB",
-                    uptime_sec: 0
-                )
-                machines.append(newVM)
+                showToast(title: "Failed to create machine '\(name)'", subtitle: error.localizedDescription, type: .error)
             }
-            showToast(title: "Machine '\(name)' created", subtitle: "\(distro) microVM ready", type: .success)
         }
     }
 
@@ -256,31 +252,15 @@ public final class OrbDaemonStore: ObservableObject {
                     "destination": .string(destination)
                 ])
                 fetchMachines()
+                performCoWDiskClone(source: source, destination: destination)
+                showToast(
+                    title: "Machine '\(destination)' cloned",
+                    subtitle: "Instant CoW clone from '\(source)'",
+                    type: .success
+                )
             } catch {
-                if let srcVM = machines.first(where: { $0.name == source }) {
-                    let clonedVM = VMSummary(
-                        name: destination,
-                        distro: srcVM.distro,
-                        version: srcVM.version,
-                        arch: srcVM.arch,
-                        state: "STOPPED",
-                        cpus: srcVM.cpus,
-                        memory_mb: srcVM.memory_mb,
-                        ip_address: "-",
-                        size: srcVM.size,
-                        uptime_sec: 0
-                    )
-                    machines.append(clonedVM)
-                }
+                showToast(title: "Failed to clone machine '\(source)'", subtitle: error.localizedDescription, type: .error)
             }
-
-            performCoWDiskClone(source: source, destination: destination)
-
-            showToast(
-                title: "Machine '\(destination)' cloned",
-                subtitle: "Instant CoW clone from '\(source)'",
-                type: .success
-            )
         }
     }
 
@@ -289,14 +269,12 @@ public final class OrbDaemonStore: ObservableObject {
             do {
                 _ = try await sendRPC(method: "vm.delete", params: ["name": .string(name)])
                 fetchMachines()
+                let machineDir = (settings.storage_location as NSString).appendingPathComponent(name)
+                try? FileManager.default.removeItem(atPath: machineDir)
+                showToast(title: "Machine '\(name)' deleted", type: .info)
             } catch {
-                machines.removeAll { $0.name == name }
+                showToast(title: "Failed to delete machine '\(name)'", subtitle: error.localizedDescription, type: .error)
             }
-
-            let machineDir = (settings.storage_location as NSString).appendingPathComponent(name)
-            try? FileManager.default.removeItem(atPath: machineDir)
-
-            showToast(title: "Machine '\(name)' deleted", type: .info)
         }
     }
 
@@ -312,59 +290,50 @@ public final class OrbDaemonStore: ObservableObject {
                     self.containers = list
                 }
             } catch {
-                // Keep default or current containers
+                // Keep current state when disconnected
             }
         }
     }
 
     public func startContainer(id: String) {
         Task {
+            let shortId = String(id.prefix(12))
             do {
                 _ = try await sendRPC(method: "container.start", params: ["id": .string(id)])
                 fetchContainers()
+                executeDockerCLI(arguments: ["start", id])
+                showToast(title: "Container \(shortId) started", type: .success)
             } catch {
-                if let idx = containers.firstIndex(where: { $0.id == id || $0.displayName == id }) {
-                    containers[idx].state = "running"
-                    containers[idx].status = "Up Just now"
-                }
+                showToast(title: "Failed to start container \(shortId)", subtitle: error.localizedDescription, type: .error)
             }
-            executeDockerCLI(arguments: ["start", id])
-            let shortId = String(id.prefix(12))
-            showToast(title: "Container \(shortId) started", type: .success)
         }
     }
 
     public func stopContainer(id: String) {
         Task {
+            let shortId = String(id.prefix(12))
             do {
                 _ = try await sendRPC(method: "container.stop", params: ["id": .string(id)])
                 fetchContainers()
+                executeDockerCLI(arguments: ["stop", id])
+                showToast(title: "Container \(shortId) stopped", type: .info)
             } catch {
-                if let idx = containers.firstIndex(where: { $0.id == id || $0.displayName == id }) {
-                    containers[idx].state = "exited"
-                    containers[idx].status = "Exited (0) Just now"
-                }
+                showToast(title: "Failed to stop container \(shortId)", subtitle: error.localizedDescription, type: .error)
             }
-            executeDockerCLI(arguments: ["stop", id])
-            let shortId = String(id.prefix(12))
-            showToast(title: "Container \(shortId) stopped", type: .info)
         }
     }
 
     public func restartContainer(id: String) {
         Task {
+            let shortId = String(id.prefix(12))
             do {
                 _ = try await sendRPC(method: "container.restart", params: ["id": .string(id)])
                 fetchContainers()
+                executeDockerCLI(arguments: ["restart", id])
+                showToast(title: "Container \(shortId) restarted", type: .success)
             } catch {
-                if let idx = containers.firstIndex(where: { $0.id == id || $0.displayName == id }) {
-                    containers[idx].state = "running"
-                    containers[idx].status = "Up 1 second"
-                }
+                showToast(title: "Failed to restart container \(shortId)", subtitle: error.localizedDescription, type: .error)
             }
-            executeDockerCLI(arguments: ["restart", id])
-            let shortId = String(id.prefix(12))
-            showToast(title: "Container \(shortId) restarted", type: .success)
         }
     }
 

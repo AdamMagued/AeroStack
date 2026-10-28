@@ -426,12 +426,40 @@ final class OrbEngineTests: XCTestCase {
         XCTAssertNil(resp.error)
     }
 
-    // MARK: - 5. VsockRouter Port Constants
+    // MARK: - 5. VsockRouter Port Constants & Exec Bridge
 
     func testVsockRouterPortAssignments() {
         XCTAssertEqual(VsockRouter.dockerPort, 2375)
         XCTAssertEqual(VsockRouter.memoryPort, 1024)
         XCTAssertEqual(VsockRouter.fsEventsPort, 9922)
         XCTAssertEqual(VsockRouter.execPort, 8022)
+    }
+
+    func testVsockRouterExecBridge() throws {
+        let router = VsockRouter()
+        let tempSock = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("test_exec_\(UUID().uuidString).sock").path
+        let testPort: UInt16 = 18022
+
+        try router.startExecBridge(tcpPort: testPort, unixSocketPath: tempSock)
+
+        // Connect TCP client to 127.0.0.1:testPort
+        let tcpFd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(tcpFd, 0)
+        defer { Darwin.close(tcpFd) }
+
+        var inAddr = sockaddr_in()
+        inAddr.sin_family = sa_family_t(AF_INET)
+        inAddr.sin_port = testPort.bigEndian
+        inet_pton(AF_INET, "127.0.0.1", &inAddr.sin_addr)
+
+        let connRes = withUnsafePointer(to: &inAddr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(tcpFd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        XCTAssertEqual(connRes, 0, "Failed to connect to exec bridge TCP port")
+
+        // Also check unix socket exists
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tempSock))
     }
 }

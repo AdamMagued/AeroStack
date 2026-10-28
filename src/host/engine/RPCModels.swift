@@ -169,6 +169,55 @@ public struct VMSummary: Identifiable, Codable, Hashable {
         self.created_at = created_at
     }
 
+    enum CodingKeys: String, CodingKey {
+        case name, distro, version, arch, state, cpus, memory_mb, ip_address, ip, size, disk_size, uptime_sec, created_at
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.name = try container.decode(String.self, forKey: .name)
+        self.distro = (try? container.decodeIfPresent(String.self, forKey: .distro)) ?? "Linux"
+        self.version = (try? container.decodeIfPresent(String.self, forKey: .version)) ?? "latest"
+        self.arch = (try? container.decodeIfPresent(String.self, forKey: .arch)) ?? "arm64"
+        self.state = (try? container.decodeIfPresent(String.self, forKey: .state)) ?? "STOPPED"
+        self.cpus = (try? container.decodeIfPresent(Int.self, forKey: .cpus)) ?? 2
+        self.memory_mb = (try? container.decodeIfPresent(Int.self, forKey: .memory_mb)) ?? 2048
+
+        if let ipAddr = try? container.decodeIfPresent(String.self, forKey: .ip_address), !ipAddr.isEmpty {
+            self.ip_address = ipAddr
+        } else if let ip = try? container.decodeIfPresent(String.self, forKey: .ip), !ip.isEmpty {
+            self.ip_address = ip
+        } else {
+            self.ip_address = "-"
+        }
+
+        if let sz = try? container.decodeIfPresent(String.self, forKey: .size), !sz.isEmpty {
+            self.size = sz
+        } else if let dsz = try? container.decodeIfPresent(String.self, forKey: .disk_size), !dsz.isEmpty {
+            self.size = dsz
+        } else {
+            self.size = "0 MB"
+        }
+
+        self.uptime_sec = (try? container.decodeIfPresent(Int64.self, forKey: .uptime_sec)) ?? 0
+        self.created_at = try? container.decodeIfPresent(String.self, forKey: .created_at)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(name, forKey: .name)
+        try container.encode(distro, forKey: .distro)
+        try container.encode(version, forKey: .version)
+        try container.encode(arch, forKey: .arch)
+        try container.encode(state, forKey: .state)
+        try container.encode(cpus, forKey: .cpus)
+        try container.encode(memory_mb, forKey: .memory_mb)
+        try container.encode(ip_address, forKey: .ip_address)
+        try container.encode(size, forKey: .size)
+        try container.encode(uptime_sec, forKey: .uptime_sec)
+        try container.encodeIfPresent(created_at, forKey: .created_at)
+    }
+
     public var isRunning: Bool {
         state == "RUNNING"
     }

@@ -206,8 +206,16 @@ func (p *DockerProxy) handleClient(clientConn net.Conn) {
 			}
 		}
 
-		req.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
-		req.ContentLength = int64(len(reqBodyBytes))
+		if len(reqBodyBytes) > 0 {
+			req.Body = io.NopCloser(bytes.NewReader(reqBodyBytes))
+			req.ContentLength = int64(len(reqBodyBytes))
+			req.Header.Set("Content-Length", strconv.Itoa(len(reqBodyBytes)))
+		} else {
+			req.Body = nil
+			req.ContentLength = 0
+			req.Header.Del("Content-Length")
+			req.Header.Del("Transfer-Encoding")
+		}
 
 		// Write modified request to backend
 		if err := req.Write(backendConn); err != nil {

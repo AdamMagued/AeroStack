@@ -64,7 +64,7 @@ public struct VMSpec: Codable {
         memoryBytes: UInt64 = 4 * 1024 * 1024 * 1024,
         kernelURL: URL? = nil,
         initrdURL: URL? = nil,
-        kernelCommandLine: String = "console=hvc0 root=/dev/vda rw quiet",
+        kernelCommandLine: String = "console=hvc0 root=/dev/vda rw rootflags=rw,discard rootfstype=ext4 quiet",
         diskConfigs: [VMDiskConfig] = [],
         shareConfigs: [VMShareConfig] = []
     ) {

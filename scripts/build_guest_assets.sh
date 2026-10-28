@@ -10,7 +10,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_DIR="${PROJECT_DIR}/build"
-CACHE_DIR="${AEROSTACK_CACHE_DIR:-${PROJECT_DIR}/aerostack_runtime/cache}"
+APFS_CACHE="/Volumes/MacStorage/aerostack/cache"
+if [ -d "${APFS_CACHE}" ]; then
+    CACHE_DIR="${AEROSTACK_CACHE_DIR:-${APFS_CACHE}}"
+else
+    CACHE_DIR="${AEROSTACK_CACHE_DIR:-${PROJECT_DIR}/aerostack_runtime/cache}"
+fi
 
 mkdir -p "${BUILD_DIR}" "${CACHE_DIR}"
 
@@ -36,6 +41,10 @@ docker run --rm \
     -v "${CACHE_DIR}:/output" \
     alpine:latest sh -c '
 set -euo pipefail
+
+echo "  * Configuring high-speed Alpine package mirrors..."
+sed -i "s|https://dl-cdn.alpinelinux.org|https://mirrors.edge.kernel.org|g" /etc/apk/repositories
+apk update >/dev/null
 
 echo "  * Installing Alpine packaging tools and kernel..."
 apk add --no-cache linux-virt e2fsprogs e2fsprogs-extra python3 gzip >/dev/null
@@ -133,12 +142,18 @@ if [ -b /dev/vda ]; then
     resize2fs /dev/vda >/dev/kmsg 2>&1 || true
 fi
 
+# Remount root with discard if needed for APFS storage reclamation
+mount -o remount,rw,discard / 2>/dev/null || true
+
+# Background recurring TRIM worker for APFS hole punching / discard reclamation
+(while true; do sleep 300; fstrim -a >/dev/null 2>&1; done) &
+
 # Mount cgroups v2
 mkdir -p /sys/fs/cgroup
 mount -t cgroup2 cgroup2 /sys/fs/cgroup
 echo "[AERO-INIT] cgroups v2 hierarchy active."
 
-# Load virtualization and networking kernel modules
+# Load virtualization, networking and translation kernel modules
 modprobe virtio_net 2>/dev/null || true
 modprobe virtio_balloon 2>/dev/null || true
 modprobe virtiofs 2>/dev/null || true
@@ -148,6 +163,7 @@ modprobe ip_tables 2>/dev/null || true
 modprobe iptable_filter 2>/dev/null || true
 modprobe iptable_nat 2>/dev/null || true
 modprobe br_netfilter 2>/dev/null || true
+modprobe binfmt_misc 2>/dev/null || true
 sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
 echo "[AERO-INIT] Virtualization, networking and vsock drivers loaded."
 
@@ -155,10 +171,44 @@ echo "[AERO-INIT] Virtualization, networking and vsock drivers loaded."
 ip link set lo up
 if ip link show eth0 >/dev/null 2>&1; then
     ip link set eth0 up
-    udhcpc -i eth0 -b -s /usr/share/udhcpc/default.script >/dev/kmsg 2>&1 &
-    ip addr add 192.168.64.2/24 dev eth0 2>/dev/null || true
-    ip route add default via 192.168.64.1 dev eth0 2>/dev/null || true
-    echo "[AERO-INIT] Network interface eth0 configured with DHCP and static fallback."
+    echo "[AERO-INIT] Waiting for eth0 link carrier..."
+    for i in $(seq 1 50); do
+        CARRIER=$(cat /sys/class/net/eth0/carrier 2>/dev/null || echo "0")
+        if [ "${CARRIER}" = "1" ] || ip link show eth0 | grep -q "state UP"; then
+            echo "[AERO-INIT] eth0 carrier detected after ${i} ticks."
+            break
+        fi
+        sleep 0.1
+    done
+
+    # Run udhcpc for dynamic lease negotiation
+    echo "[AERO-INIT] Negotiating DHCP lease on eth0..."
+    udhcpc -i eth0 -s /usr/share/udhcpc/default.script -n -t 5 -T 2 -q >/dev/kmsg 2>&1 || \
+        udhcpc -i eth0 -b -s /usr/share/udhcpc/default.script >/dev/kmsg 2>&1 &
+
+    # Detect dynamic gateway rather than hardcoding 192.168.64.1
+    GATEWAY=$(ip route show default dev eth0 2>/dev/null | cut -d" " -f3 | head -n 1)
+    if [ -z "${GATEWAY}" ]; then
+        GATEWAY="192.168.64.1"
+        ip addr add 192.168.64.2/24 dev eth0 2>/dev/null || true
+        ip route add default via "${GATEWAY}" dev eth0 2>/dev/null || true
+    fi
+
+    # Add host.docker.internal pointing to the host gateway into guest /etc/hosts
+    sed -i "/host\.docker\.internal/d" /etc/hosts 2>/dev/null || true
+    echo "${GATEWAY} host.docker.internal" >> /etc/hosts
+
+    # Configure DNS in /etc/resolv.conf
+    cat << EOF_RESOLV > /etc/resolv.conf
+nameserver ${GATEWAY}
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+EOF_RESOLV
+
+    # Ensure NAT masquerading for outbound container traffic
+    iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || true
+
+    echo "[AERO-INIT] Network eth0 configured (gateway: ${GATEWAY}, host.docker.internal mapped)."
 fi
 
 # VirtioFS workspace mounts
@@ -169,13 +219,15 @@ echo "[AERO-INIT] VirtioFS workspace mounted at /workspace."
 # Apple Silicon Rosetta 2 Linux Binary Translation
 mkdir -p /run/rosetta /media/rosetta /proc/sys/fs/binfmt_misc
 if mount -t virtiofs rosetta /run/rosetta 2>/dev/null || mount -t virtiofs rosetta /media/rosetta 2>/dev/null; then
-    mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
+    mountpoint -q /proc/sys/fs/binfmt_misc || mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
     ROSETTA_BIN="/run/rosetta/rosetta"
     if [ ! -f "${ROSETTA_BIN}" ] && [ -f "/media/rosetta/rosetta" ]; then
         ROSETTA_BIN="/media/rosetta/rosetta"
     fi
     if [ -f "${ROSETTA_BIN}" ] && [ -w /proc/sys/fs/binfmt_misc/register ]; then
-        echo ":rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:${ROSETTA_BIN}:CF" > /proc/sys/fs/binfmt_misc/register 2>/dev/null || true
+        if [ ! -f /proc/sys/fs/binfmt_misc/rosetta ]; then
+            echo ":rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:${ROSETTA_BIN}:CF" > /proc/sys/fs/binfmt_misc/register 2>/dev/null || true
+        fi
         echo "[AERO-INIT] Apple Silicon Rosetta 2 binfmt_misc registered for x86_64 Linux translation."
     fi
 fi
@@ -232,6 +284,17 @@ mke2fs -t ext4 -F -L "AERO_ROOT" -d /tmp/rootfs /output/rootfs.ext4 64G >/dev/nu
 
 echo "  * Asset compilation completed successfully inside container."
 '
+
+if [ -f "${CACHE_DIR}/rootfs.ext4" ] && [ "${CACHE_DIR}" != "${PROJECT_DIR}/aerostack_runtime/cache" ]; then
+    mkdir -p "${PROJECT_DIR}/aerostack_runtime/cache"
+    ln -sf "${CACHE_DIR}/rootfs.ext4" "${PROJECT_DIR}/aerostack_runtime/cache/rootfs.ext4"
+    if [ -f "${CACHE_DIR}/vmlinux" ]; then
+        ln -sf "${CACHE_DIR}/vmlinux" "${PROJECT_DIR}/aerostack_runtime/cache/vmlinux"
+    fi
+    if [ -f "${CACHE_DIR}/initramfs-virt" ]; then
+        ln -sf "${CACHE_DIR}/initramfs-virt" "${PROJECT_DIR}/aerostack_runtime/cache/initramfs-virt"
+    fi
+fi
 
 echo "=========================================================="
 echo " Guest Assets Verified in ${CACHE_DIR}:"

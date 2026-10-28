@@ -21,11 +21,14 @@ public enum SidebarTab: String, CaseIterable, Identifiable {
 }
 
 public struct OrbMainView: View {
-    @StateObject private var store = OrbDaemonStore()
+    @ObservedObject private var store: OrbDaemonStore
     @State private var selectedTab: SidebarTab? = .machines
     @State private var showCreateMachineSheet: Bool = false
 
-    public init() {}
+    @MainActor
+    public init(store: OrbDaemonStore = OrbDaemonStore.shared) {
+        self.store = store
+    }
 
     public var body: some View {
         NavigationSplitView {

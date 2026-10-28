@@ -210,7 +210,7 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
                     do {
                         let guestConn = try await self.connectToGuest(port: Self.dockerPort)
                         print("[DOCKER] Connected to guest vsock 2375, guestFd: \(guestConn.fileDescriptor)")
-                        self.spliceSockets(clientFd: clientFd, guestConn: guestConn)
+                        self.spliceSockets(clientFd: clientFd, guestConn: guestConn, rewriteDockerPaths: true)
                     } catch {
                         print("[DOCKER] Connection to guest Docker vsock (port \(Self.dockerPort)) failed: \(error)")
                         close(clientFd)
@@ -220,7 +220,176 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
         }
     }
 
-    private func spliceSockets(clientFd: Int32, guestConn: VZVirtioSocketConnection) {
+    // MARK: - Exec Host Bridge
+
+    /// Bridges local host connections (TCP 127.0.0.1:8022 or Unix socket) to Guest Exec vsock port 8022
+    public func startExecBridge(tcpPort: UInt16 = 8022, unixSocketPath: String? = nil) throws {
+        // 1. TCP 127.0.0.1:tcpPort
+        let tcpFd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard tcpFd >= 0 else {
+            throw NSError(domain: "VsockRouter", code: -10, userInfo: [NSLocalizedDescriptionKey: "Failed to create TCP socket for exec bridge"])
+        }
+
+        var opt: Int32 = 1
+        _ = setsockopt(tcpFd, SOL_SOCKET, SO_REUSEADDR, &opt, socklen_t(MemoryLayout<Int32>.size))
+        #if canImport(Darwin)
+        _ = setsockopt(tcpFd, SOL_SOCKET, SO_NOSIGPIPE, &opt, socklen_t(MemoryLayout<Int32>.size))
+        #endif
+
+        var inAddr = sockaddr_in()
+        inAddr.sin_family = sa_family_t(AF_INET)
+        inAddr.sin_port = tcpPort.bigEndian
+        inet_pton(AF_INET, "127.0.0.1", &inAddr.sin_addr)
+
+        let inAddrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let tcpBind = withUnsafePointer(to: &inAddr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(tcpFd, $0, inAddrLen)
+            }
+        }
+        guard tcpBind == 0 else {
+            close(tcpFd)
+            throw NSError(domain: "VsockRouter", code: -11, userInfo: [NSLocalizedDescriptionKey: "Failed to bind TCP 127.0.0.1:\(tcpPort): \(String(cString: strerror(errno)))"])
+        }
+
+        Darwin.listen(tcpFd, 128)
+        print("[EXEC] Host vsock exec bridge listening on 127.0.0.1:\(tcpPort)")
+
+        routerQueue.async { [weak self] in
+            while true {
+                var clientAddr = sockaddr_in()
+                var clientLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+                let clientFd = withUnsafeMutablePointer(to: &clientAddr) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        Darwin.accept(tcpFd, $0, &clientLen)
+                    }
+                }
+                guard clientFd >= 0 else { continue }
+                print("[EXEC] Incoming connection on TCP port \(tcpPort), clientFd: \(clientFd)")
+
+                Task {
+                    guard let self = self else {
+                        close(clientFd)
+                        return
+                    }
+                    do {
+                        let guestConn = try await self.connectToGuest(port: Self.execPort)
+                        print("[EXEC] Connected to guest vsock \(Self.execPort), guestFd: \(guestConn.fileDescriptor)")
+                        self.spliceSockets(clientFd: clientFd, guestConn: guestConn, rewriteDockerPaths: false)
+                    } catch {
+                        print("[EXEC] Connection to guest exec vsock (port \(Self.execPort)) failed: \(error)")
+                        close(clientFd)
+                    }
+                }
+            }
+        }
+
+        // 2. Optional Unix domain socket (e.g. ~/.aerostack/run/exec.sock)
+        if let uPath = unixSocketPath, !uPath.isEmpty {
+            let dir = (uPath as NSString).deletingLastPathComponent
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            unlink(uPath)
+
+            let unixFd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+            if unixFd >= 0 {
+                var uAddr = sockaddr_un()
+                uAddr.sun_family = sa_family_t(AF_UNIX)
+                let maxLen = MemoryLayout.size(ofValue: uAddr.sun_path)
+                _ = uPath.withCString {
+                    strncpy(&uAddr.sun_path.0, $0, maxLen - 1)
+                }
+
+                let uAddrLen = socklen_t(MemoryLayout<sockaddr_un>.size)
+                let uBind = withUnsafePointer(to: &uAddr) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        Darwin.bind(unixFd, $0, uAddrLen)
+                    }
+                }
+                if uBind == 0 {
+                    Darwin.listen(unixFd, 128)
+                    chmod(uPath, 0o666)
+                    print("[EXEC] Host vsock exec bridge listening on unix://\(uPath)")
+
+                    routerQueue.async { [weak self] in
+                        while true {
+                            var clientAddr = sockaddr_un()
+                            var clientLen = socklen_t(MemoryLayout<sockaddr_un>.size)
+                            let clientFd = withUnsafeMutablePointer(to: &clientAddr) {
+                                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                                    Darwin.accept(unixFd, $0, &clientLen)
+                                }
+                            }
+                            guard clientFd >= 0 else { continue }
+                            print("[EXEC] Incoming connection on unix socket, clientFd: \(clientFd)")
+
+                            Task {
+                                guard let self = self else {
+                                    close(clientFd)
+                                    return
+                                }
+                                do {
+                                    let guestConn = try await self.connectToGuest(port: Self.execPort)
+                                    self.spliceSockets(clientFd: clientFd, guestConn: guestConn, rewriteDockerPaths: false)
+                                } catch {
+                                    print("[EXEC] Connection to guest exec vsock failed: \(error)")
+                                    close(clientFd)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    close(unixFd)
+                }
+            }
+        }
+    }
+
+    // MARK: - Splicing with Optional Path Rewriting
+
+    private func rewriteContainerCreatePayload(data: Data) -> Data {
+        guard let text = String(data: data, encoding: .utf8) else {
+            return data
+        }
+        guard text.contains("/containers/create") else {
+            return data
+        }
+
+        let separator = "\r\n\r\n"
+        guard let sepRange = text.range(of: separator) else {
+            return data
+        }
+        let headersPart = String(text[..<sepRange.lowerBound])
+        let bodyPart = String(text[sepRange.upperBound...])
+
+        var newBody = bodyPart
+        newBody = newBody.replacingOccurrences(of: "/Volumes/AdamSSD/antigravity_workspace", with: "/workspace")
+        newBody = newBody.replacingOccurrences(of: "/Volumes/AdamSSD", with: "/workspace")
+
+        let homeDir = NSHomeDirectory()
+        if !homeDir.isEmpty && homeDir != "/var/root" {
+            newBody = newBody.replacingOccurrences(of: homeDir, with: "/workspace")
+        }
+
+        if newBody == bodyPart {
+            return data
+        }
+
+        guard let newBodyData = newBody.data(using: .utf8) else {
+            return data
+        }
+
+        var headerLines = headersPart.components(separatedBy: "\r\n")
+        for i in 0..<headerLines.count {
+            if headerLines[i].lowercased().hasPrefix("content-length:") {
+                headerLines[i] = "Content-Length: \(newBodyData.count)"
+            }
+        }
+        let newHeaders = headerLines.joined(separator: "\r\n")
+        let fullPayload = newHeaders + separator + newBody
+        return fullPayload.data(using: .utf8) ?? data
+    }
+
+    private func spliceSockets(clientFd: Int32, guestConn: VZVirtioSocketConnection, rewriteDockerPaths: Bool = false) {
         let guestFd = guestConn.fileDescriptor
         var optVal: Int32 = 1
         _ = setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &optVal, socklen_t(MemoryLayout<Int32>.size))
@@ -256,16 +425,42 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
             }
         }
 
-        // Client -> Guest (macOS Docker client -> Linux guest dockerd)
-        q.async {
+        // Client -> Guest
+        q.async { [weak self] in
             let bufferSize = 65536
             let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
             defer { buf.deallocate() }
+            var isFirstChunk = true
+
             while true {
                 let n = Darwin.read(clientFd, buf, bufferSize)
                 if n <= 0 {
                     break
                 }
+
+                if isFirstChunk && rewriteDockerPaths, let self = self {
+                    isFirstChunk = false
+                    let incomingData = Data(bytes: buf, count: n)
+                    let rewritten = self.rewriteContainerCreatePayload(data: incomingData)
+                    var written = 0
+                    var writeFailed = false
+                    rewritten.withUnsafeBytes { raw in
+                        while written < raw.count {
+                            let w = Darwin.write(guestFd, raw.baseAddress!.advanced(by: written), raw.count - written)
+                            if w <= 0 {
+                                writeFailed = true
+                                break
+                            }
+                            written += w
+                        }
+                    }
+                    if writeFailed {
+                        terminate()
+                        return
+                    }
+                    continue
+                }
+
                 var written = 0
                 var writeFailed = false
                 while written < n {

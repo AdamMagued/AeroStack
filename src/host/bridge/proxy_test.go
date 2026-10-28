@@ -222,6 +222,80 @@ func TestDockerProxy_EndToEnd(t *testing.T) {
 	}
 }
 
+func TestPathTranslator_WorkspaceAndSSD(t *testing.T) {
+	pt := NewPathTranslator("/workspace")
+
+	hostPath := "/Volumes/AdamSSD/antigravity_workspace/orbstack_free"
+	guestPath := pt.HostToGuest(hostPath)
+	expectedGuest := "/workspace/orbstack_free"
+	if guestPath != expectedGuest {
+		t.Fatalf("Expected %s, got %s", expectedGuest, guestPath)
+	}
+
+	reversed := pt.GuestToHost(guestPath)
+	if reversed != hostPath {
+		t.Fatalf("Expected %s, got %s", hostPath, reversed)
+	}
+
+	createReq := []byte(`{
+		"Image": "alpine",
+		"HostConfig": {
+			"Binds": ["/Volumes/AdamSSD/antigravity_workspace/orbstack_free:/test:rw"]
+		}
+	}`)
+	rewritten, err := pt.TranslateContainerCreateRequestBody(createReq)
+	if err != nil {
+		t.Fatalf("TranslateContainerCreateRequestBody failed: %v", err)
+	}
+	if !bytes.Contains(rewritten, []byte(`"/workspace/orbstack_free:/test:rw"`)) {
+		t.Fatalf("Expected rewritten bind mount /workspace/orbstack_free:/test:rw, got: %s", string(rewritten))
+	}
+}
+
+func TestPathTranslator_MountsArrayTranslation(t *testing.T) {
+	pt := NewPathTranslator("/workspace")
+
+	createReq := []byte(`{
+		"Image": "alpine",
+		"Mounts": [
+			{
+				"Type": "bind",
+				"Source": "/Volumes/AdamSSD/antigravity_workspace/test_app",
+				"Target": "/app"
+			},
+			{
+				"Type": "bind",
+				"Source": "/Users/adammaged/code",
+				"Target": "/code"
+			}
+		]
+	}`)
+	rewritten, err := pt.TranslateContainerCreateRequestBody(createReq)
+	if err != nil {
+		t.Fatalf("TranslateContainerCreateRequestBody failed: %v", err)
+	}
+
+	var parsed struct {
+		Mounts []struct {
+			Source string `json:"Source"`
+			Target string `json:"Target"`
+		} `json:"Mounts"`
+	}
+	if err := json.Unmarshal(rewritten, &parsed); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if len(parsed.Mounts) != 2 {
+		t.Fatalf("Expected 2 mounts, got %d", len(parsed.Mounts))
+	}
+	if parsed.Mounts[0].Source != "/workspace/test_app" {
+		t.Fatalf("Expected /workspace/test_app, got %s", parsed.Mounts[0].Source)
+	}
+	if parsed.Mounts[1].Source != "/mnt/mac/Users/adammaged/code" {
+		t.Fatalf("Expected /mnt/mac/Users/adammaged/code, got %s", parsed.Mounts[1].Source)
+	}
+}
+
 func bufioReader(c net.Conn) *bufio.Reader {
 	return bufio.NewReader(c)
 }
+

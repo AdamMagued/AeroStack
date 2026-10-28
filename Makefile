@@ -22,12 +22,14 @@ setup:
 
 build-host: setup
 	@echo "--> Building macOS Host Engine (orb-vmd)..."
+	@find $(PROJECT_DIR) -name "._*" -delete 2>/dev/null || true
 	@if [ -f "$(PROJECT_DIR)/Package.swift" ]; then \
-		swift build --package-path $(PROJECT_DIR) --scratch-path $(SCRATCH_DIR) -c release --product orb-vmd && \
+		COPYFILE_DISABLE=1 swift build --package-path $(PROJECT_DIR) --scratch-path $(SCRATCH_DIR) -c release --product orb-vmd && \
 		cp $(SCRATCH_DIR)/release/orb-vmd $(BUILD_DIR)/orb-vmd; \
 	elif [ -f "$(PROJECT_DIR)/src/host/engine/main.swift" ]; then \
-		swiftc -O -parse-as-library $(PROJECT_DIR)/src/host/engine/*.swift -o $(BUILD_DIR)/orb-vmd; \
+		COPYFILE_DISABLE=1 swiftc -O -parse-as-library $(PROJECT_DIR)/src/host/engine/*.swift -o $(BUILD_DIR)/orb-vmd; \
 	fi
+	@find $(BUILD_DIR) -name "._*" -delete 2>/dev/null || true
 	@codesign --force --sign - --entitlements $(PROJECT_DIR)/entitlements.plist $(BUILD_DIR)/orb-vmd 2>/dev/null || true
 	@echo "    Built: $(BUILD_DIR)/orb-vmd"
 
@@ -48,12 +50,13 @@ build-bridge: setup
 	fi
 
 build-cli: setup
-	@echo "--> Building Unified CLI (orbctl & orb)..."
+	@echo "--> Building Unified CLI (aerostack, orbctl & orb)..."
 	@if [ -f "$(PROJECT_DIR)/src/host/cli/main.go" ]; then \
 		GOCACHE=$(GOCACHE_DIR) GOPATH=$(GOPATH_DIR) CGO_ENABLED=0 \
-		go build -ldflags="-s -w" -o $(BUILD_DIR)/orbctl $(PROJECT_DIR)/src/host/cli/... && \
-		ln -sf $(BUILD_DIR)/orbctl $(BUILD_DIR)/orb && \
-		echo "    Built: $(BUILD_DIR)/orbctl (and symlink $(BUILD_DIR)/orb)"; \
+		go build -ldflags="-s -w" -o $(BUILD_DIR)/aerostack $(PROJECT_DIR)/src/host/cli && \
+		ln -sf aerostack $(BUILD_DIR)/orbctl && \
+		ln -sf aerostack $(BUILD_DIR)/orb && \
+		echo "    Built: $(BUILD_DIR)/aerostack (and symlinks orbctl, orb)"; \
 	fi
 
 build-network: setup

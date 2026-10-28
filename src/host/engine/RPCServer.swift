@@ -37,13 +37,7 @@ public final class RPCServer: @unchecked Sendable {
     }
 
     public init(
-        socketPath: String = {
-            let aeroSock = ("~/.aerostack/run/vmcontrol.sock" as NSString).expandingTildeInPath
-            if FileManager.default.fileExists(atPath: aeroSock) {
-                return aeroSock
-            }
-            return ("~/.orbstack/run/vmcontrol.sock" as NSString).expandingTildeInPath
-        }(),
+        socketPath: String = ("~/.aerostack/run/vmcontrol.sock" as NSString).expandingTildeInPath,
         settings: OrbSettings = OrbSettings(),
         machinesDirectory: URL? = nil
     ) {
@@ -75,10 +69,18 @@ public final class RPCServer: @unchecked Sendable {
             if fm.fileExists(atPath: item.path, isDirectory: &isDir), isDir.boolValue {
                 let metaURL = item.appendingPathComponent("metadata.json")
                 let altMetaURL = item.appendingPathComponent("machine.json")
-                let targetURL = fm.fileExists(atPath: metaURL.path) ? metaURL : altMetaURL
-                if fm.fileExists(atPath: targetURL.path),
-                   let data = try? Data(contentsOf: targetURL),
-                   var summary = try? decoder.decode(VMSummary.self, from: data) {
+                var loadedSummary: VMSummary? = nil
+                if fm.fileExists(atPath: metaURL.path),
+                   let data = try? Data(contentsOf: metaURL),
+                   let summary = try? decoder.decode(VMSummary.self, from: data) {
+                    loadedSummary = summary
+                } else if fm.fileExists(atPath: altMetaURL.path),
+                          let data = try? Data(contentsOf: altMetaURL),
+                          let summary = try? decoder.decode(VMSummary.self, from: data) {
+                    loadedSummary = summary
+                }
+
+                if var summary = loadedSummary {
                     let actualSize = calculateMachineDirectorySize(url: item)
                     if actualSize != "0 MB" {
                         summary.size = actualSize
@@ -602,21 +604,31 @@ public final class RPCServer: @unchecked Sendable {
             return RPCResponse(id: request.id, result: .bool(true))
 
         case "metrics.get":
-            let footprint = MemoryBalloonController.queryHostFootprint()
+            let residentMB = RPCServer.queryHostResidentMB()
             let bStats = memoryController?.getStats()
             let fsStats = fileWatcher?.getStats()
+            let hostCpu = RPCServer.queryHostCPUPercent()
+
+            let guestCpu = bStats?.psi_some_percent ?? 0.0
+            let guestMem: Int64
+            if let b = bStats, b.target_ram_mb > b.avail_ram_mb {
+                guestMem = Int64(b.target_ram_mb - b.avail_ram_mb)
+            } else {
+                guestMem = Int64(residentMB)
+            }
+            let fsOps = fsStats?.events_sent ?? 0
 
             let metrics = LiveMetrics(
                 timestamp: Int64(Date().timeIntervalSince1970),
-                host_cpu_percent: 1.2,
-                guest_cpu_percent: 0.8,
-                memory_used_mb: Int64(footprint.residentMB),
+                host_cpu_percent: hostCpu,
+                guest_cpu_percent: guestCpu,
+                memory_used_mb: guestMem,
                 memory_total_mb: Int64(settings.max_memory_mb),
                 balloon_freed_mb: Int64(max(0, Int64(settings.max_memory_mb) - Int64(bStats?.target_ram_mb ?? 512))),
-                virtiofs_ops_per_sec: Int64(fsStats?.events_sent ?? 0) > 0 ? Int64(fsStats!.events_sent) : 2850,
-                virtiofs_cache_hit_rate: 99.1,
-                network_rx_kbps: 184.2,
-                network_tx_kbps: 62.7
+                virtiofs_ops_per_sec: Int64(fsOps),
+                virtiofs_cache_hit_rate: fsOps > 0 ? 99.1 : 0.0,
+                network_rx_kbps: 0.0,
+                network_tx_kbps: 0.0
             )
             if let encoded = try? JSONEncoder().encode(metrics),
                let codableVal = try? JSONDecoder().decode(AnyCodableValue.self, from: encoded) {
@@ -719,5 +731,47 @@ public final class RPCServer: @unchecked Sendable {
         default:
             return RPCResponse(id: request.id, error: RPCError.methodNotFound)
         }
+    }
+
+    private static func queryHostResidentMB() -> Double {
+        var basicInfo = mach_task_basic_info_data_t()
+        var basicCount = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info_data_t>.size / 4)
+        let kr = withUnsafeMutablePointer(to: &basicInfo) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(basicCount)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &basicCount)
+            }
+        }
+        if kr == KERN_SUCCESS {
+            return Double(basicInfo.resident_size) / (1024.0 * 1024.0)
+        }
+        return MemoryBalloonController.queryHostFootprint().residentMB
+    }
+
+    private static func queryHostCPUPercent() -> Double {
+        var threadsList: thread_act_array_t?
+        var threadsCount: mach_msg_type_number_t = 0
+        let kr = task_threads(mach_task_self_, &threadsList, &threadsCount)
+        guard kr == KERN_SUCCESS, let threads = threadsList else { return 0.0 }
+        defer {
+            let size = vm_size_t(threadsCount) * vm_size_t(MemoryLayout<thread_t>.size)
+            vm_deallocate(mach_task_self_, vm_address_t(bitPattern: threads), size)
+        }
+
+        var totalUsage: Double = 0.0
+        for i in 0..<Int(threadsCount) {
+            var threadInfo = thread_basic_info()
+            var count = mach_msg_type_number_t(THREAD_INFO_MAX)
+            let res = withUnsafeMutablePointer(to: &threadInfo) { ptr in
+                ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPtr in
+                    thread_info(threads[i], thread_flavor_t(THREAD_BASIC_INFO), intPtr, &count)
+                }
+            }
+            if res == KERN_SUCCESS {
+                if (threadInfo.flags & TH_FLAGS_IDLE) == 0 {
+                    totalUsage += Double(threadInfo.cpu_usage) / Double(TH_USAGE_SCALE) * 100.0
+                }
+            }
+        }
+        return totalUsage
     }
 }

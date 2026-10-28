@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"net"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -348,4 +352,121 @@ func TestDNSServer_AerostackLocal(t *testing.T) {
 	if ok {
 		t.Fatalf("Expected record to be removed after UnregisterRecord")
 	}
+}
+
+func TestDockerPortWatcher_Lifecycle(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "docker_test_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mockSock := filepath.Join(tmpDir, "docker.sock")
+	l, err := net.Listen("unix", mockSock)
+	if err != nil {
+		t.Fatalf("Failed to listen on unix socket: %v", err)
+	}
+	defer l.Close()
+
+	// Mock Docker server
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				r := bufio.NewReader(c)
+				req, err := http.ReadRequest(r)
+				if err != nil {
+					return
+				}
+
+				if strings.Contains(req.URL.Path, "/containers/json") {
+					resp := "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n[]"
+					_, _ = c.Write([]byte(resp))
+				} else if strings.Contains(req.URL.Path, "/events") {
+					respHeader := "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"
+					_, _ = c.Write([]byte(respHeader))
+
+					// Emit start event
+					startEv := `{"Type":"container","Action":"start","Actor":{"ID":"c123456789012"}}` + "\n"
+					_, _ = fmt.Fprintf(c, "%x\r\n%s\r\n", len(startEv), startEv)
+
+					// Wait for inspect
+					<-time.After(100 * time.Millisecond)
+
+					// Emit stop event
+					stopEv := `{"Type":"container","Action":"stop","Actor":{"ID":"c123456789012"}}` + "\n"
+					_, _ = fmt.Fprintf(c, "%x\r\n%s\r\n", len(stopEv), stopEv)
+				} else if strings.Contains(req.URL.Path, "/containers/c123456789012/json") {
+					inspectJSON := `{
+						"Id": "c123456789012",
+						"NetworkSettings": {
+							"IPAddress": "172.17.0.2",
+							"Ports": {
+								"80/tcp": [{"HostIp": "127.0.0.1", "HostPort": "19080"}]
+							}
+						}
+					}`
+					resp := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(inspectJSON), inspectJSON)
+					_, _ = c.Write([]byte(resp))
+				}
+			}(conn)
+		}
+	}()
+
+	pf := NewPortForwarder()
+	pf.Start()
+	defer pf.Stop()
+
+	watcher := NewDockerPortWatcher(mockSock, pf, "192.168.128.2")
+	watcher.Start()
+
+	// Wait up to 2 seconds for event processing
+	deadline := time.Now().Add(2 * time.Second)
+	sawRule := false
+	for time.Now().Before(deadline) {
+		rules := pf.ListRules()
+		for _, r := range rules {
+			if r.HostPort == 19080 {
+				sawRule = true
+				break
+			}
+		}
+		if sawRule {
+			break
+		}
+		<-time.After(20 * time.Millisecond)
+	}
+
+	if !sawRule {
+		t.Fatalf("Watcher did not forward port 19080 for started container")
+	}
+
+	// Wait for unforwarding after stop event
+	deadline = time.Now().Add(2 * time.Second)
+	unforwarded := false
+	for time.Now().Before(deadline) {
+		rules := pf.ListRules()
+		hasRule := false
+		for _, r := range rules {
+			if r.HostPort == 19080 {
+				hasRule = true
+				break
+			}
+		}
+		if !hasRule {
+			unforwarded = true
+			break
+		}
+		<-time.After(20 * time.Millisecond)
+	}
+
+	if !unforwarded {
+		t.Fatalf("Watcher did not unforward port 19080 on container stop")
+	}
+
+	watcher.Stop()
 }
