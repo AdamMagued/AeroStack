@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"sync"
@@ -133,6 +134,10 @@ func (f *DockerForwarder) proxyConn(clientConn net.Conn) {
 	}
 	defer closeBoth()
 
+	type closeWriter interface {
+		CloseWrite() error
+	}
+
 	// Bidirectional chunk forwarding with immediate flush and logging
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -140,7 +145,6 @@ func (f *DockerForwarder) proxyConn(clientConn net.Conn) {
 	// client -> backend (macOS host -> guest dockerd)
 	go func() {
 		defer wg.Done()
-		defer closeBoth()
 		buf := make([]byte, 32*1024)
 		for {
 			nr, er := clientConn.Read(buf)
@@ -153,19 +157,26 @@ func (f *DockerForwarder) proxyConn(clientConn net.Conn) {
 				nw, ew := backendConn.Write(buf[:nr])
 				if ew != nil {
 					log.Printf("[orb-agent:docker] Error writing to dockerd: %v", ew)
-					break
+					closeBoth()
+					return
 				}
 				if nw != nr {
 					log.Printf("[orb-agent:docker] Short write to dockerd: %d != %d", nw, nr)
-					break
+					closeBoth()
+					return
 				}
 			}
 			if er != nil {
-				log.Printf("[orb-agent:docker] client read finished: %v", er)
+				if er != io.EOF {
+					log.Printf("[orb-agent:docker] client read error: %v", er)
+					closeBoth()
+					return
+				}
+				log.Printf("[orb-agent:docker] client read finished: EOF")
 				break
 			}
 		}
-		if cw, ok := backendConn.(interface{ CloseWrite() error }); ok {
+		if cw, ok := backendConn.(closeWriter); ok {
 			_ = cw.CloseWrite()
 		}
 	}()
@@ -173,7 +184,6 @@ func (f *DockerForwarder) proxyConn(clientConn net.Conn) {
 	// backend -> client (guest dockerd -> macOS host)
 	go func() {
 		defer wg.Done()
-		defer closeBoth()
 		buf := make([]byte, 32*1024)
 		for {
 			nr, er := backendConn.Read(buf)
@@ -186,19 +196,26 @@ func (f *DockerForwarder) proxyConn(clientConn net.Conn) {
 				nw, ew := clientConn.Write(buf[:nr])
 				if ew != nil {
 					log.Printf("[orb-agent:docker] Error writing to vsock client: %v", ew)
-					break
+					closeBoth()
+					return
 				}
 				if nw != nr {
 					log.Printf("[orb-agent:docker] Short write to vsock client: %d != %d", nw, nr)
-					break
+					closeBoth()
+					return
 				}
 			}
 			if er != nil {
-				log.Printf("[orb-agent:docker] dockerd read finished: %v", er)
+				if er != io.EOF {
+					log.Printf("[orb-agent:docker] dockerd read error: %v", er)
+					closeBoth()
+					return
+				}
+				log.Printf("[orb-agent:docker] dockerd read finished: EOF")
 				break
 			}
 		}
-		if cw, ok := clientConn.(interface{ CloseWrite() error }); ok {
+		if cw, ok := clientConn.(closeWriter); ok {
 			_ = cw.CloseWrite()
 		}
 	}()

@@ -85,13 +85,16 @@ func SpliceHijackedStream(clientConn net.Conn, clientBuf *bufio.Reader,
 	}
 	defer closeBoth()
 
+	type closeWriter interface {
+		CloseWrite() error
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	// Goroutine 1: Client -> Backend (stdin)
 	go func() {
 		defer wg.Done()
-		defer closeBoth()
 
 		// First flush any pre-buffered client bytes
 		if clientBuf != nil && clientBuf.Buffered() > 0 {
@@ -100,7 +103,13 @@ func SpliceHijackedStream(clientConn net.Conn, clientBuf *bufio.Reader,
 			if _, err := io.ReadFull(clientBuf, buf); err == nil {
 				if wn, werr := backendConn.Write(buf); werr == nil {
 					atomic.AddInt64(&bytesC2B, int64(wn))
+				} else {
+					closeBoth()
+					return
 				}
+			} else {
+				closeBoth()
+				return
 			}
 		}
 
@@ -110,19 +119,22 @@ func SpliceHijackedStream(clientConn net.Conn, clientBuf *bufio.Reader,
 			r = clientBuf
 		}
 
-		n, _ := io.Copy(backendConn, r)
+		n, err := io.Copy(backendConn, r)
 		atomic.AddInt64(&bytesC2B, n)
+		if err != nil {
+			closeBoth()
+			return
+		}
 
 		// Signal EOF to backend
-		if closeWriter, ok := backendConn.(interface{ CloseWrite() error }); ok {
-			_ = closeWriter.CloseWrite()
+		if cw, ok := backendConn.(closeWriter); ok {
+			_ = cw.CloseWrite()
 		}
 	}()
 
 	// Goroutine 2: Backend -> Client (stdout/stderr)
 	go func() {
 		defer wg.Done()
-		defer closeBoth()
 
 		// First flush any pre-buffered backend bytes
 		if backendBuf != nil && backendBuf.Buffered() > 0 {
@@ -131,7 +143,13 @@ func SpliceHijackedStream(clientConn net.Conn, clientBuf *bufio.Reader,
 			if _, err := io.ReadFull(backendBuf, buf); err == nil {
 				if wn, werr := clientConn.Write(buf); werr == nil {
 					atomic.AddInt64(&bytesB2C, int64(wn))
+				} else {
+					closeBoth()
+					return
 				}
+			} else {
+				closeBoth()
+				return
 			}
 		}
 
@@ -141,12 +159,16 @@ func SpliceHijackedStream(clientConn net.Conn, clientBuf *bufio.Reader,
 			r = backendBuf
 		}
 
-		n, _ := io.Copy(clientConn, r)
+		n, err := io.Copy(clientConn, r)
 		atomic.AddInt64(&bytesB2C, n)
+		if err != nil {
+			closeBoth()
+			return
+		}
 
 		// Signal EOF to client
-		if closeWriter, ok := clientConn.(interface{ CloseWrite() error }); ok {
-			_ = closeWriter.CloseWrite()
+		if cw, ok := clientConn.(closeWriter); ok {
+			_ = cw.CloseWrite()
 		}
 	}()
 

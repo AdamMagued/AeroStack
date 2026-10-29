@@ -469,6 +469,17 @@ func isatty(fd uintptr) bool {
 	return term.IsTerminal(int(fd))
 }
 
+const (
+	ExecMsgRequest      = 1
+	ExecMsgResponse     = 2
+	ExecMsgDataStdin    = 3
+	ExecMsgDataStdout   = 4
+	ExecMsgDataStderr   = 5
+	ExecMsgWindowResize = 6
+	ExecMsgExitStatus   = 7
+	ExecMsgStdinEOF     = 8
+)
+
 func sendResizeFrame(conn net.Conn, rows, cols uint16) error {
 	payload, err := json.Marshal(map[string]uint16{
 		"rows": rows,
@@ -478,7 +489,7 @@ func sendResizeFrame(conn net.Conn, rows, cols uint16) error {
 		return err
 	}
 	frame := make([]byte, 5+len(payload))
-	frame[0] = 6 // ExecMsgWindowResize
+	frame[0] = ExecMsgWindowResize
 	binary.BigEndian.PutUint32(frame[1:], uint32(len(payload)))
 	copy(frame[5:], payload)
 	_, err = conn.Write(frame)
@@ -578,7 +589,7 @@ func runRemoteExec(conn net.Conn, mach, u, wdir string, cmd []string, outWriter,
 			n, rerr := os.Stdin.Read(buf)
 			if n > 0 {
 				inHdr := make([]byte, 5+n)
-				inHdr[0] = 3 // ExecMsgDataStdin
+				inHdr[0] = ExecMsgDataStdin
 				binary.BigEndian.PutUint32(inHdr[1:], uint32(n))
 				copy(inHdr[5:], buf[:n])
 				if _, werr := conn.Write(inHdr); werr != nil {
@@ -586,6 +597,12 @@ func runRemoteExec(conn net.Conn, mach, u, wdir string, cmd []string, outWriter,
 				}
 			}
 			if rerr != nil {
+				if rerr == io.EOF {
+					eofHdr := make([]byte, 5)
+					eofHdr[0] = ExecMsgStdinEOF
+					binary.BigEndian.PutUint32(eofHdr[1:], 0)
+					_, _ = conn.Write(eofHdr)
+				}
 				return
 			}
 		}
@@ -605,11 +622,11 @@ func runRemoteExec(conn net.Conn, mach, u, wdir string, cmd []string, outWriter,
 			break
 		}
 
-		if mType == 4 { // Stdout
+		if mType == ExecMsgDataStdout {
 			outWriter.Write(pBuf)
-		} else if mType == 5 { // Stderr
+		} else if mType == ExecMsgDataStderr {
 			errWriter.Write(pBuf)
-		} else if mType == 7 { // ExitStatus
+		} else if mType == ExecMsgExitStatus {
 			if len(pBuf) >= 4 {
 				exitCode = int(int32(binary.BigEndian.Uint32(pBuf)))
 			}

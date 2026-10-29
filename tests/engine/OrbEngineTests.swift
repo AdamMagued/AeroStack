@@ -464,4 +464,39 @@ final class OrbEngineTests: XCTestCase {
         // Also check unix socket exists
         XCTAssertTrue(FileManager.default.fileExists(atPath: tempSock))
     }
+
+    // MARK: - 6. Sparse File Copying & Extent Fallback Tests
+
+    func testSparseCopyFileIntegrity() throws {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("sparse_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let srcPath = tempDir.appendingPathComponent("src.bin").path
+        let dstPath = tempDir.appendingPathComponent("dst.bin").path
+
+        let fd = Darwin.open(srcPath, O_CREAT | O_RDWR | O_TRUNC, 0o644)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        let chunk1 = "HEADER_EXTENT_DATA_1".utf8CString
+        chunk1.withUnsafeBytes { _ = Darwin.write(fd, $0.baseAddress, chunk1.count) }
+        _ = Darwin.lseek(fd, 1024 * 1024, SEEK_SET)
+        let chunk2 = "MIDDLE_EXTENT_DATA_2".utf8CString
+        chunk2.withUnsafeBytes { _ = Darwin.write(fd, $0.baseAddress, chunk2.count) }
+        _ = Darwin.lseek(fd, 2 * 1024 * 1024, SEEK_SET)
+        let chunk3 = "FOOTER_EXTENT_DATA_3".utf8CString
+        chunk3.withUnsafeBytes { _ = Darwin.write(fd, $0.baseAddress, chunk3.count) }
+        Darwin.close(fd)
+
+        let server = RPCServer(socketPath: tempDir.appendingPathComponent("test.sock").path)
+        let copySuccess = server.sparseCopyFile(from: srcPath, to: dstPath)
+
+        if copySuccess {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: dstPath))
+            let srcData = try Data(contentsOf: URL(fileURLWithPath: srcPath))
+            let dstData = try Data(contentsOf: URL(fileURLWithPath: dstPath))
+            XCTAssertEqual(srcData, dstData, "Destination data must match source data byte-for-byte")
+        } else {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: dstPath), "Failed sparseCopyFile must unlink destination")
+        }
+    }
 }

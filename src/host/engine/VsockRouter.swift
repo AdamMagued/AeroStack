@@ -410,7 +410,12 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
 
             while true {
                 let n = Darwin.read(clientFd, buf, bufferSize)
-                if n <= 0 {
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    terminate()
+                    return
+                }
+                if n == 0 {
                     break
                 }
 
@@ -419,6 +424,7 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
                 while written < n {
                     let w = Darwin.write(guestFd, buf.advanced(by: written), n - written)
                     if w <= 0 {
+                        if w < 0 && errno == EINTR { continue }
                         writeFailed = true
                         break
                     }
@@ -430,7 +436,6 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
                 }
             }
             Darwin.shutdown(guestFd, SHUT_WR)
-            Darwin.shutdown(guestFd, SHUT_RDWR)
             markDone()
         }
 
@@ -441,7 +446,12 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
             defer { buf.deallocate() }
             while true {
                 let n = Darwin.read(guestFd, buf, bufferSize)
-                if n <= 0 {
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    terminate()
+                    return
+                }
+                if n == 0 {
                     break
                 }
                 var written = 0
@@ -449,6 +459,7 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
                 while written < n {
                     let w = Darwin.write(clientFd, buf.advanced(by: written), n - written)
                     if w <= 0 {
+                        if w < 0 && errno == EINTR { continue }
                         writeFailed = true
                         break
                     }
@@ -460,7 +471,6 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
                 }
             }
             Darwin.shutdown(clientFd, SHUT_WR)
-            Darwin.shutdown(clientFd, SHUT_RDWR)
             markDone()
         }
     }

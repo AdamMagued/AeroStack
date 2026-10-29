@@ -253,7 +253,7 @@ public final class RPCServer: @unchecked Sendable {
         }
     }
 
-    private func sparseCopyFile(from srcPath: String, to dstPath: String) -> Bool {
+    func sparseCopyFile(from srcPath: String, to dstPath: String) -> Bool {
         let srcFd = Darwin.open(srcPath, O_RDONLY)
         guard srcFd >= 0 else { return false }
         defer { Darwin.close(srcFd) }
@@ -264,7 +264,13 @@ public final class RPCServer: @unchecked Sendable {
 
         let dstFd = Darwin.open(dstPath, O_CREAT | O_WRONLY | O_TRUNC, 0o644)
         guard dstFd >= 0 else { return false }
-        defer { Darwin.close(dstFd) }
+        var success = false
+        defer {
+            Darwin.close(dstFd)
+            if !success {
+                Darwin.unlink(dstPath)
+            }
+        }
 
         var targetSize = totalSize
         if Darwin.ftruncate(dstFd, totalSize) != 0 {
@@ -279,25 +285,42 @@ public final class RPCServer: @unchecked Sendable {
 
         while pos < targetSize {
             let dataStart = Darwin.lseek(srcFd, pos, SEEK_DATA)
-            if dataStart < 0 || dataStart >= targetSize {
+            if dataStart < 0 {
+                if errno == ENXIO {
+                    break
+                }
+                return false
+            }
+            if dataStart >= targetSize {
                 break
             }
             var holeStart = Darwin.lseek(srcFd, dataStart, SEEK_HOLE)
-            if holeStart < 0 || holeStart > targetSize {
+            if holeStart < 0 {
+                if errno == ENXIO {
+                    holeStart = targetSize
+                } else {
+                    return false
+                }
+            } else if holeStart > targetSize {
                 holeStart = targetSize
             }
             _ = Darwin.lseek(dstFd, dataStart, SEEK_SET)
+            _ = Darwin.lseek(srcFd, dataStart, SEEK_SET)
             var curr = dataStart
             while curr < holeStart {
                 let toRead = min(buffer.count, Int(holeStart - curr))
                 let bytesRead = Darwin.read(srcFd, &buffer, toRead)
-                if bytesRead <= 0 { break }
+                if bytesRead <= 0 {
+                    if bytesRead < 0 && errno == EINTR { continue }
+                    break
+                }
                 var written = 0
                 while written < bytesRead {
                     let w = buffer.withUnsafeBytes { rawBuf in
                         Darwin.write(dstFd, rawBuf.baseAddress!.advanced(by: written), bytesRead - written)
                     }
                     if w <= 0 {
+                        if w < 0 && errno == EINTR { continue }
                         return false
                     }
                     written += w
@@ -306,6 +329,7 @@ public final class RPCServer: @unchecked Sendable {
             }
             pos = holeStart
         }
+        success = true
         return true
     }
 

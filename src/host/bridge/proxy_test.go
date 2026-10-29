@@ -370,3 +370,106 @@ func bufioReader(c net.Conn) *bufio.Reader {
 	return bufio.NewReader(c)
 }
 
+func TestHijacker_HalfClose(t *testing.T) {
+	cClient, cProxy, err := socketPair()
+	if err != nil {
+		t.Fatalf("socketPair failed: %v", err)
+	}
+	defer cClient.Close()
+	defer cProxy.Close()
+
+	bProxy, bBackend, err := socketPair()
+	if err != nil {
+		t.Fatalf("socketPair failed: %v", err)
+	}
+	defer bProxy.Close()
+	defer bBackend.Close()
+
+	backendDone := make(chan struct{})
+	go func() {
+		defer close(backendDone)
+		reqData, err := io.ReadAll(bBackend)
+		if err != nil {
+			return
+		}
+		_, _ = bBackend.Write(append([]byte("HIJACK_REPLY:"), reqData...))
+		if cw, ok := bBackend.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
+	}()
+
+	statsDone := make(chan *StreamStats, 1)
+	go func() {
+		stats, hErr := SpliceHijackedStream(cProxy, nil, bProxy, nil)
+		if hErr != nil {
+			t.Errorf("SpliceHijackedStream error: %v", hErr)
+		}
+		statsDone <- stats
+	}()
+
+	testMsg := "echo_half_close_test"
+	if _, err := cClient.Write([]byte(testMsg)); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	if cw, ok := cClient.(interface{ CloseWrite() error }); ok {
+		if err := cw.CloseWrite(); err != nil {
+			t.Fatalf("CloseWrite failed: %v", err)
+		}
+	} else {
+		t.Fatalf("cClient does not implement CloseWrite")
+	}
+
+	resp, err := io.ReadAll(cClient)
+	if err != nil {
+		t.Fatalf("Failed to read reply: %v", err)
+	}
+
+	expected := "HIJACK_REPLY:" + testMsg
+	if string(resp) != expected {
+		t.Fatalf("Expected %q, got %q", expected, string(resp))
+	}
+
+	<-backendDone
+	stats := <-statsDone
+	if stats.BytesClientToBackend != int64(len(testMsg)) {
+		t.Fatalf("BytesClientToBackend mismatch: %d != %d", stats.BytesClientToBackend, len(testMsg))
+	}
+}
+
+func socketPair() (net.Conn, net.Conn, error) {
+	tmpDir, err := os.MkdirTemp("/tmp", "sp_*")
+	if err != nil {
+		return nil, nil, err
+	}
+	defer os.RemoveAll(tmpDir)
+	sockPath := filepath.Join(tmpDir, "p.sock")
+
+	l, err := net.Listen("unix", sockPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer l.Close()
+
+	type connResult struct {
+		c   net.Conn
+		err error
+	}
+	resCh := make(chan connResult, 1)
+	go func() {
+		c, err := l.Accept()
+		resCh <- connResult{c, err}
+	}()
+
+	c1, err := net.Dial("unix", sockPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	res := <-resCh
+	if res.err != nil {
+		c1.Close()
+		return nil, nil, res.err
+	}
+	return c1, res.c, nil
+}
+

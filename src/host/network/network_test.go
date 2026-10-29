@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -333,6 +334,81 @@ func TestPortForwarder_TCP(t *testing.T) {
 	if err := pf.RemoveForward("tcp", "127.0.0.1", hostPort); err != nil {
 		t.Fatalf("RemoveForward failed: %v", err)
 	}
+}
+
+func TestPortForwarder_TCP_HalfClose(t *testing.T) {
+	backendListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to listen backend: %v", err)
+	}
+	defer backendListener.Close()
+
+	backendPort := backendListener.Addr().(*net.TCPAddr).Port
+
+	backendDone := make(chan struct{})
+	go func() {
+		defer close(backendDone)
+		conn, err := backendListener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		data, err := io.ReadAll(conn)
+		if err != nil {
+			return
+		}
+		_, _ = conn.Write(append([]byte("HALF_CLOSE_REPLY:"), data...))
+	}()
+
+	pf := NewPortForwarder()
+	pf.Start()
+	defer pf.Stop()
+
+	freeL, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to find free port: %v", err)
+	}
+	hostPort := freeL.Addr().(*net.TCPAddr).Port
+	freeL.Close()
+
+	if err := pf.ForwardTCP("127.0.0.1", hostPort, "127.0.0.1", backendPort); err != nil {
+		t.Fatalf("ForwardTCP failed: %v", err)
+	}
+	defer func() {
+		_ = pf.RemoveForward("tcp", "127.0.0.1", hostPort)
+	}()
+
+	clientConn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", hostPort))
+	if err != nil {
+		t.Fatalf("Client dial failed: %v", err)
+	}
+	defer clientConn.Close()
+
+	payload := "streaming_request_payload"
+	if _, err := clientConn.Write([]byte(payload)); err != nil {
+		t.Fatalf("Client write failed: %v", err)
+	}
+
+	tcpClient, ok := clientConn.(*net.TCPConn)
+	if !ok {
+		t.Fatalf("Expected *net.TCPConn")
+	}
+	if err := tcpClient.CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite failed: %v", err)
+	}
+
+	resp, err := io.ReadAll(clientConn)
+	if err != nil {
+		t.Fatalf("Failed to read server response after half-close: %v", err)
+	}
+
+	expected := "HALF_CLOSE_REPLY:" + payload
+	if string(resp) != expected {
+		t.Fatalf("Mismatch: expected %q, got %q", expected, string(resp))
+	}
+
+	<-backendDone
 }
 
 func TestDNSServer_AerostackLocal(t *testing.T) {

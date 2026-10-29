@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -443,6 +444,247 @@ func TestExecServer_NonTTYBackgroundChild(t *testing.T) {
 	}
 	if !bytes.Contains(stdoutBuf.Bytes(), []byte("background_test_ok")) {
 		t.Fatalf("Expected 'background_test_ok' in output, got: %q", stdoutBuf.String())
+	}
+}
+
+func TestDockerForwarder_HalfClose(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "ag_fwd_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	mockSock := filepath.Join(tmpDir, "d.sock")
+
+	mockBackend, err := net.Listen("unix", mockSock)
+	if err != nil {
+		t.Fatalf("Failed to listen on mock socket: %v", err)
+	}
+	defer mockBackend.Close()
+
+	backendDone := make(chan struct{})
+	go func() {
+		defer close(backendDone)
+		conn, err := mockBackend.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		req, err := io.ReadAll(conn)
+		if err != nil {
+			return
+		}
+		if bytes.Contains(req, []byte("HALF_CLOSE_PING")) {
+			_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\n\r\nPONG_HALF_CLOSE"))
+		}
+	}()
+
+	fwd := NewDockerForwarder(DockerForwarderConfig{
+		DockerSockPath: mockSock,
+	})
+	fwdListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to listen fwd: %v", err)
+	}
+	fwd.listener = fwdListener
+	fwd.running = 1
+	fwd.wg.Add(1)
+	go fwd.acceptLoop()
+	defer fwd.Stop()
+
+	client, err := net.Dial("tcp", fwdListener.Addr().String())
+	if err != nil {
+		t.Fatalf("Failed to dial forwarder: %v", err)
+	}
+	defer client.Close()
+
+	_, _ = client.Write([]byte("GET /v1.45/HALF_CLOSE_PING HTTP/1.1\r\n\r\n"))
+
+	tcpClient, ok := client.(*net.TCPConn)
+	if !ok {
+		t.Fatalf("Expected *net.TCPConn")
+	}
+	if err := tcpClient.CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite failed: %v", err)
+	}
+
+	resp, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatalf("Failed to read reply: %v", err)
+	}
+
+	if !bytes.Contains(resp, []byte("PONG_HALF_CLOSE")) {
+		t.Fatalf("Expected PONG_HALF_CLOSE, got: %q", string(resp))
+	}
+
+	<-backendDone
+}
+
+func TestExecServer_PipeStdinEOF(t *testing.T) {
+	server := NewExecServer(ExecServerConfig{ListenPort: 0})
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to create loopback listener: %v", err)
+	}
+	defer l.Close()
+
+	server.listener = l
+	server.running = 1
+	server.wg.Add(1)
+	go server.acceptLoop()
+	defer server.Stop()
+
+	conn, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		t.Fatalf("Failed to dial exec server: %v", err)
+	}
+	defer conn.Close()
+
+	req := ExecRequest{
+		Command: []string{"cat"},
+		Tty:     false,
+	}
+	reqBytes, _ := json.Marshal(req)
+	hdr := make([]byte, 5)
+	hdr[0] = byte(ExecMsgRequest)
+	binary.BigEndian.PutUint32(hdr[1:], uint32(len(reqBytes)))
+	_, _ = conn.Write(hdr)
+	_, _ = conn.Write(reqBytes)
+
+	respHdr := make([]byte, 5)
+	if _, err := io.ReadFull(conn, respHdr); err != nil {
+		t.Fatalf("Failed to read resp header: %v", err)
+	}
+	respLen := binary.BigEndian.Uint32(respHdr[1:])
+	respBody := make([]byte, respLen)
+	if _, err := io.ReadFull(conn, respBody); err != nil {
+		t.Fatalf("Failed to read resp body: %v", err)
+	}
+
+	var execResp ExecResponse
+	if err := json.Unmarshal(respBody, &execResp); err != nil || !execResp.Started {
+		t.Fatalf("Exec did not start: %v, resp: %+v", err, execResp)
+	}
+
+	testPayload := []byte("hello_pipe_eof_world\n")
+	stdinHdr := make([]byte, 5+len(testPayload))
+	stdinHdr[0] = byte(ExecMsgDataStdin)
+	binary.BigEndian.PutUint32(stdinHdr[1:], uint32(len(testPayload)))
+	copy(stdinHdr[5:], testPayload)
+	if _, err := conn.Write(stdinHdr); err != nil {
+		t.Fatalf("Failed to write stdin data: %v", err)
+	}
+
+	eofHdr := make([]byte, 5)
+	eofHdr[0] = byte(ExecMsgStdinEOF)
+	binary.BigEndian.PutUint32(eofHdr[1:], 0)
+	if _, err := conn.Write(eofHdr); err != nil {
+		t.Fatalf("Failed to write stdin EOF: %v", err)
+	}
+
+	var stdoutBuf bytes.Buffer
+	var exitCode int
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		for {
+			fHdr := make([]byte, 5)
+			if _, err := io.ReadFull(conn, fHdr); err != nil {
+				break
+			}
+			mType := ExecMsgType(fHdr[0])
+			pLen := binary.BigEndian.Uint32(fHdr[1:])
+			pBuf := make([]byte, pLen)
+			if _, err := io.ReadFull(conn, pBuf); err != nil {
+				break
+			}
+			if mType == ExecMsgDataStdout {
+				stdoutBuf.Write(pBuf)
+			} else if mType == ExecMsgExitStatus {
+				exitCode = int(int32(binary.BigEndian.Uint32(pBuf)))
+				break
+			}
+		}
+	}()
+
+	select {
+	case <-readDone:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("Pipe exec deadlocked reading stdin EOF!")
+	}
+
+	if exitCode != 0 {
+		t.Fatalf("Expected exit code 0, got %d", exitCode)
+	}
+	if !bytes.Contains(stdoutBuf.Bytes(), testPayload) {
+		t.Fatalf("Expected %q in stdout, got %q", string(testPayload), stdoutBuf.String())
+	}
+}
+
+func TestExecServer_OrphanProcessCleanupOnDisconnect(t *testing.T) {
+	server := NewExecServer(ExecServerConfig{ListenPort: 0})
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to create loopback listener: %v", err)
+	}
+	defer l.Close()
+
+	server.listener = l
+	server.running = 1
+	server.wg.Add(1)
+	go server.acceptLoop()
+	defer server.Stop()
+
+	conn, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		t.Fatalf("Failed to dial exec server: %v", err)
+	}
+
+	req := ExecRequest{
+		Command: []string{"sleep", "60"},
+		Tty:     false,
+	}
+	reqBytes, _ := json.Marshal(req)
+	hdr := make([]byte, 5)
+	hdr[0] = byte(ExecMsgRequest)
+	binary.BigEndian.PutUint32(hdr[1:], uint32(len(reqBytes)))
+	_, _ = conn.Write(hdr)
+	_, _ = conn.Write(reqBytes)
+
+	respHdr := make([]byte, 5)
+	if _, err := io.ReadFull(conn, respHdr); err != nil {
+		t.Fatalf("Failed to read resp header: %v", err)
+	}
+	respLen := binary.BigEndian.Uint32(respHdr[1:])
+	respBody := make([]byte, respLen)
+	if _, err := io.ReadFull(conn, respBody); err != nil {
+		t.Fatalf("Failed to read resp body: %v", err)
+	}
+
+	var execResp ExecResponse
+	if err := json.Unmarshal(respBody, &execResp); err != nil || !execResp.Started || execResp.PID <= 0 {
+		t.Fatalf("Exec did not start: %v, resp: %+v", err, execResp)
+	}
+
+	childPid := execResp.PID
+
+	_ = conn.Close()
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.After(3 * time.Second)
+
+	terminated := false
+	for !terminated {
+		select {
+		case <-timeout:
+			t.Fatalf("Process %d was not cleaned up after client disconnect (orphan leak)", childPid)
+		case <-ticker.C:
+			err := syscall.Kill(childPid, 0)
+			if err != nil {
+				terminated = true
+			}
+		}
 	}
 }
 

@@ -28,6 +28,7 @@ const (
 	ExecMsgDataStderr   ExecMsgType = 5
 	ExecMsgWindowResize ExecMsgType = 6
 	ExecMsgExitStatus   ExecMsgType = 7
+	ExecMsgStdinEOF     ExecMsgType = 8
 )
 
 // ExecRequest payload sent from host CLI to guest agent
@@ -350,6 +351,8 @@ func (s *ExecServer) handlePTYExec(conn net.Conn, cmd *exec.Cmd, req ExecRequest
 				if _, werr := ptmx.Write(pBuf); werr != nil {
 					return
 				}
+			case ExecMsgStdinEOF:
+				// No-op in PTY mode
 			case ExecMsgWindowResize:
 				var resize WindowResizePayload
 				if err := json.Unmarshal(pBuf, &resize); err == nil && resize.Rows > 0 && resize.Cols > 0 {
@@ -416,6 +419,35 @@ func (s *ExecServer) handlePipeExec(conn net.Conn, cmd *exec.Cmd) {
 	_, _ = conn.Write(respHdr)
 	_, _ = conn.Write(respBytes)
 
+	var stdinClosed atomic.Bool
+	closeStdin := func() {
+		if stdinClosed.CompareAndSwap(false, true) {
+			_ = cmdStdin.Close()
+		}
+	}
+	defer closeStdin()
+
+	cmdDone := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(cmdDone)
+	}()
+
+	var killOnce sync.Once
+	killProcess := func() {
+		killOnce.Do(func() {
+			closeStdin()
+			if cmd.Process != nil {
+				_ = cmd.Process.Signal(syscall.SIGTERM)
+				select {
+				case <-cmdDone:
+				case <-time.After(1 * time.Second):
+					_ = cmd.Process.Kill()
+				}
+			}
+		})
+	}
+
 	var streamWg sync.WaitGroup
 
 	// Stream stdout -> conn
@@ -431,6 +463,7 @@ func (s *ExecServer) handlePipeExec(conn net.Conn, cmd *exec.Cmd) {
 				binary.BigEndian.PutUint32(frame[1:], uint32(n))
 				copy(frame[5:], buf[:n])
 				if _, werr := conn.Write(frame); werr != nil {
+					killProcess()
 					return
 				}
 			}
@@ -453,6 +486,7 @@ func (s *ExecServer) handlePipeExec(conn net.Conn, cmd *exec.Cmd) {
 				binary.BigEndian.PutUint32(frame[1:], uint32(n))
 				copy(frame[5:], buf[:n])
 				if _, werr := conn.Write(frame); werr != nil {
+					killProcess()
 					return
 				}
 			}
@@ -464,21 +498,29 @@ func (s *ExecServer) handlePipeExec(conn net.Conn, cmd *exec.Cmd) {
 
 	// Read stdin frames from conn
 	go func() {
-		defer cmdStdin.Close()
+		defer closeStdin()
 		fHdr := make([]byte, 5)
 		for {
 			if _, err := io.ReadFull(conn, fHdr); err != nil {
+				killProcess()
 				return
 			}
 			mType := ExecMsgType(fHdr[0])
 			pLen := binary.BigEndian.Uint32(fHdr[1:])
 			pBuf := make([]byte, pLen)
 			if _, err := io.ReadFull(conn, pBuf); err != nil {
+				killProcess()
 				return
 			}
+			if mType == ExecMsgStdinEOF || (mType == ExecMsgDataStdin && pLen == 0) {
+				closeStdin()
+				continue
+			}
 			if mType == ExecMsgDataStdin {
-				if _, werr := cmdStdin.Write(pBuf); werr != nil {
-					return
+				if !stdinClosed.Load() {
+					if _, werr := cmdStdin.Write(pBuf); werr != nil {
+						return
+					}
 				}
 			}
 		}
@@ -491,12 +533,6 @@ func (s *ExecServer) handlePipeExec(conn net.Conn, cmd *exec.Cmd) {
 	go func() {
 		streamWg.Wait()
 		close(pipesDone)
-	}()
-
-	cmdDone := make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		close(cmdDone)
 	}()
 
 	select {

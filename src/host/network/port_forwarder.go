@@ -160,26 +160,36 @@ func (pf *PortForwarder) proxyTCPConnection(clientConn net.Conn, targetIP string
 	}
 	defer closeBoth()
 
+	type closeWriter interface {
+		CloseWrite() error
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	// client -> target
 	go func() {
 		defer wg.Done()
-		defer closeBoth()
-		_, _ = io.Copy(targetConn, clientConn)
-		if tc, ok := targetConn.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
+		_, err := io.Copy(targetConn, clientConn)
+		if err != nil {
+			closeBoth()
+			return
+		}
+		if cw, ok := targetConn.(closeWriter); ok {
+			_ = cw.CloseWrite()
 		}
 	}()
 
 	// target -> client
 	go func() {
 		defer wg.Done()
-		defer closeBoth()
-		_, _ = io.Copy(clientConn, targetConn)
-		if cc, ok := clientConn.(*net.TCPConn); ok {
-			_ = cc.CloseWrite()
+		_, err := io.Copy(clientConn, targetConn)
+		if err != nil {
+			closeBoth()
+			return
+		}
+		if cw, ok := clientConn.(closeWriter); ok {
+			_ = cw.CloseWrite()
 		}
 	}()
 
