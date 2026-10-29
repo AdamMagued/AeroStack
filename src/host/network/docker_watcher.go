@@ -55,6 +55,7 @@ type DockerPortWatcher struct {
 	containerRules map[string][]ForwardRule
 	stopCh         chan struct{}
 	running        bool
+	conn           net.Conn
 	wg             sync.WaitGroup
 }
 
@@ -96,6 +97,18 @@ func (w *DockerPortWatcher) Start() {
 	log.Printf("[orb-netd:docker] Docker event port forwarder started watching: %s", w.dockerSockPath)
 }
 
+// flushRules removes all active container forwarding rules and clears tracking
+func (w *DockerPortWatcher) flushRules() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, rules := range w.containerRules {
+		for _, r := range rules {
+			_ = w.forwarder.RemoveForward(r.Protocol, r.HostIP, r.HostPort)
+		}
+	}
+	w.containerRules = make(map[string][]ForwardRule)
+}
+
 // Stop cleanly unregisters all container forwards and terminates subscriber
 func (w *DockerPortWatcher) Stop() {
 	w.mu.Lock()
@@ -105,18 +118,14 @@ func (w *DockerPortWatcher) Stop() {
 	}
 	w.running = false
 	close(w.stopCh)
+	if w.conn != nil {
+		_ = w.conn.SetReadDeadline(time.Now())
+		_ = w.conn.Close()
+	}
 	w.mu.Unlock()
 
 	w.wg.Wait()
-
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for _, rules := range w.containerRules {
-		for _, r := range rules {
-			_ = w.forwarder.RemoveForward(r.Protocol, r.HostIP, r.HostPort)
-		}
-	}
-	w.containerRules = make(map[string][]ForwardRule)
+	w.flushRules()
 	log.Printf("[orb-netd:docker] Docker event port forwarder stopped cleanly.")
 }
 
@@ -149,12 +158,23 @@ func (w *DockerPortWatcher) eventLoop() {
 			}
 		}
 
+		w.mu.Lock()
+		w.conn = conn
+		w.mu.Unlock()
+
 		// Initial synchronization of currently active containers
 		w.syncExistingContainers()
 
 		// Stream Docker container events
 		w.streamEvents(conn)
 		_ = conn.Close()
+
+		w.mu.Lock()
+		w.conn = nil
+		w.mu.Unlock()
+
+		// Flush zombie rules on disconnect
+		w.flushRules()
 
 		select {
 		case <-w.stopCh:

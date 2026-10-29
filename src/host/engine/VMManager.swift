@@ -315,6 +315,9 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
             }
         }
 
+        consoleOutputPipe.fileHandleForReading.readabilityHandler = nil
+        self.virtualMachine = nil
+
         stateLock.withLock {
             self.startedAt = nil
             self.ipAddress = "-"
@@ -434,7 +437,12 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
 
     private func updateState(_ newState: VMState) {
         self.state = newState
-        onStateChanged?(newState)
+        let cb = self.onStateChanged
+        if let cb = cb {
+            DispatchQueue.global(qos: .userInitiated).async {
+                cb(newState)
+            }
+        }
     }
 
     private func setupConsoleReader() {

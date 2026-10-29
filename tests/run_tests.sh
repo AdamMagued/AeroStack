@@ -32,6 +32,17 @@ echo "--> 3. Running Swift Host Engine Tests..."
 export COPYFILE_DISABLE=1
 find "$BUILD_DIR" -name "._*" -delete 2>/dev/null || true
 swift build --build-tests --scratch-path "$BUILD_DIR" 2>&1 | grep -v "CodeSign" || true
+swift build -c release --product orb-vmd --scratch-path "$BUILD_DIR" 2>&1 | grep -v "CodeSign" || true
+RELEASE_BIN=$(find "$BUILD_DIR" -type f -name "orb-vmd" -path "*/Release/*" 2>/dev/null | head -n 1)
+if [ -n "$RELEASE_BIN" ] && [ -f "$RELEASE_BIN" ]; then
+    mkdir -p "$REPO_ROOT/build"
+    cp "$RELEASE_BIN" "$REPO_ROOT/build/orb-vmd"
+    find "$REPO_ROOT/build" -name "._*" -delete 2>/dev/null || true
+    if [ -f "$REPO_ROOT/build/entitlements.plist" ]; then
+        codesign --remove-signature "$REPO_ROOT/build/orb-vmd" 2>/dev/null || true
+        codesign --force --sign - --entitlements "$REPO_ROOT/build/entitlements.plist" "$REPO_ROOT/build/orb-vmd" 2>/dev/null || true
+    fi
+fi
 find "$BUILD_DIR/out/Products/Debug/OrbEngineTests.xctest" -name "._*" -delete 2>/dev/null || true
 codesign --force --sign - "$BUILD_DIR/out/Products/Debug/OrbEngineTests.xctest"
 xcrun xctest "$BUILD_DIR/out/Products/Debug/OrbEngineTests.xctest"

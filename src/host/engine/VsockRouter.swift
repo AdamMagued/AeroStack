@@ -14,6 +14,7 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
     public var vmQueue: DispatchQueue?
 
     private var listeners: [UInt32: VZVirtioSocketListener] = [:]
+    private var activeConnections: [Int32: VZVirtioSocketConnection] = [:]
     private let routerQueue = DispatchQueue(label: "com.orbstack_free.vsock_router", qos: .userInteractive)
     private let routerLock = NSLock()
     private var isSimulated: Bool = false
@@ -95,6 +96,10 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
 
     private func handleMemoryConnection(_ connection: VZVirtioSocketConnection) {
         let fd = connection.fileDescriptor
+        routerLock.lock()
+        activeConnections[fd] = connection
+        routerLock.unlock()
+
         self.memoryController?.sendControlFrameHandler = { [weak connection] frame in
             guard let conn = connection else { return }
             let encoded = frame.encode()
@@ -103,6 +108,11 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
             }
         }
         routerQueue.async { [weak self] in
+            defer {
+                self?.routerLock.lock()
+                self?.activeConnections.removeValue(forKey: fd)
+                self?.routerLock.unlock()
+            }
             var buf = [UInt8](repeating: 0, count: 40)
             while true {
                 var total = 0
@@ -125,6 +135,9 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
 
     private func handleFsEventsConnection(_ connection: VZVirtioSocketConnection) {
         let fd = connection.fileDescriptor
+        routerLock.lock()
+        activeConnections[fd] = connection
+        routerLock.unlock()
         let transport = SocketStreamTransport(fileDescriptor: fd)
         fileWatcher?.transport = transport
     }
@@ -417,6 +430,7 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
                 }
             }
             Darwin.shutdown(guestFd, SHUT_WR)
+            Darwin.shutdown(guestFd, SHUT_RDWR)
             markDone()
         }
 
@@ -446,6 +460,7 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
                 }
             }
             Darwin.shutdown(clientFd, SHUT_WR)
+            Darwin.shutdown(clientFd, SHUT_RDWR)
             markDone()
         }
     }

@@ -69,9 +69,6 @@ public final class RPCServer: @unchecked Sendable {
     }
 
     public func reloadMachinesFromDisk() {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-
         let dir = machinesDirectoryURL
         let fm = FileManager.default
         if !fm.fileExists(atPath: dir.path) {
@@ -144,14 +141,16 @@ public final class RPCServer: @unchecked Sendable {
             )
             loaded["ubuntu"] = defaultUbuntu
             loaded["alpine"] = defaultAlpine
-            saveMachineMetadataLocked(defaultUbuntu)
-            saveMachineMetadataLocked(defaultAlpine)
+            saveMachineMetadata(defaultUbuntu)
+            saveMachineMetadata(defaultAlpine)
         }
 
+        stateLock.lock()
         self.vms = loaded
+        stateLock.unlock()
     }
 
-    private func saveMachineMetadataLocked(_ vm: VMSummary) {
+    private func saveMachineMetadata(_ vm: VMSummary) {
         let machDir = machinesDirectoryURL.appendingPathComponent(vm.name)
         let fm = FileManager.default
         if !fm.fileExists(atPath: machDir.path) {
@@ -165,6 +164,10 @@ public final class RPCServer: @unchecked Sendable {
             try? data.write(to: metaURL, options: .atomic)
             try? data.write(to: altMetaURL, options: .atomic)
         }
+    }
+
+    private func saveMachineMetadataLocked(_ vm: VMSummary) {
+        saveMachineMetadata(vm)
     }
 
     private func calculateMachineDirectorySize(url: URL) -> String {
@@ -188,7 +191,7 @@ public final class RPCServer: @unchecked Sendable {
         return "0 MB"
     }
 
-    private func provisionDiskImage(at targetURL: URL, templateURL: URL?) {
+    private func provisionDiskImage(at targetURL: URL, templateURL: URL?) throws {
         let fm = FileManager.default
         if let template = templateURL?.resolvingSymlinksInPath(), fm.fileExists(atPath: template.path) {
             let cloneRes = clonefile(template.path, targetURL.path, 0)
@@ -198,35 +201,112 @@ public final class RPCServer: @unchecked Sendable {
             // Check available disk space on target filesystem before dense cross-volume copy
             var sfs = statvfs()
             let targetDir = targetURL.deletingLastPathComponent().path
-            var hasSpace = true
-            if statvfs(targetDir, &sfs) == 0 {
-                let availBytes = UInt64(sfs.f_bavail) * UInt64(sfs.f_frsize)
-                let tFd = Darwin.open(template.path, O_RDONLY)
-                if tFd >= 0 {
-                    var st = Darwin.stat()
-                    if fstat(tFd, &st) == 0 {
-                        let fileSize = UInt64(st.st_size)
-                        if fileSize > 2 * 1024 * 1024 * 1024 || availBytes < fileSize {
-                            hasSpace = false
-                        }
-                    }
-                    Darwin.close(tFd)
-                }
+            guard statvfs(targetDir, &sfs) == 0 else {
+                throw NSError(domain: "RPCServer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to stat target directory \(targetDir)"])
             }
-            if hasSpace {
-                if copyfile(template.path, targetURL.path, nil, copyfile_flags_t(COPYFILE_ALL)) == 0 {
-                    return
-                }
-                if (try? fm.copyItem(at: template, to: targetURL)) != nil {
-                    return
-                }
+            let availBytes = UInt64(sfs.f_bavail) * UInt64(sfs.f_frsize)
+            let tFd = Darwin.open(template.path, O_RDONLY)
+            guard tFd >= 0 else {
+                throw NSError(domain: "RPCServer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to open template image: \(template.path)"])
+            }
+            var st = Darwin.stat()
+            let fstatRes = fstat(tFd, &st)
+            Darwin.close(tFd)
+            guard fstatRes == 0 else {
+                throw NSError(domain: "RPCServer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to fstat template image"])
+            }
+            let allocatedBytes = UInt64(max(0, st.st_blocks)) * 512
+            let requiredBytes = max(allocatedBytes, 512 * 1024 * 1024)
+            if availBytes < requiredBytes {
+                throw NSError(domain: "RPCServer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Insufficient disk space: required \(requiredBytes / (1024 * 1024)) MB, available \(availBytes / (1024 * 1024)) MB"])
+            }
+            if sparseCopyFile(from: template.path, to: targetURL.path) {
+                return
+            }
+            if copyfile(template.path, targetURL.path, nil, copyfile_flags_t(COPYFILE_ALL)) == 0 {
+                return
+            }
+            if (try? fm.copyItem(at: template, to: targetURL)) != nil {
+                return
+            }
+            throw NSError(domain: "RPCServer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to copy template image to \(targetURL.path)"])
+        }
+
+        // When no template is provided, check for at least 1GB space before creating disk image
+        var sfs = statvfs()
+        let targetDir = targetURL.deletingLastPathComponent().path
+        let diskSize: off_t = 1024 * 1024 * 1024
+        if statvfs(targetDir, &sfs) == 0 {
+            let availBytes = UInt64(sfs.f_bavail) * UInt64(sfs.f_frsize)
+            if availBytes < UInt64(diskSize) {
+                throw NSError(domain: "RPCServer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Insufficient disk space for blank VM disk: required 1GB, available \(availBytes / (1024 * 1024)) MB"])
             }
         }
         let fd = open(targetURL.path, O_RDWR | O_CREAT | O_TRUNC, 0o644)
-        if fd >= 0 {
-            ftruncate(fd, 2 * 1024 * 1024 * 1024)
-            close(fd)
+        guard fd >= 0 else {
+            throw NSError(domain: "RPCServer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to create disk image at \(targetURL.path)"])
         }
+        let truncRes = ftruncate(fd, diskSize)
+        close(fd)
+        if truncRes != 0 {
+            throw NSError(domain: "RPCServer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to set disk image size"])
+        }
+    }
+
+    private func sparseCopyFile(from srcPath: String, to dstPath: String) -> Bool {
+        let srcFd = Darwin.open(srcPath, O_RDONLY)
+        guard srcFd >= 0 else { return false }
+        defer { Darwin.close(srcFd) }
+
+        var st = Darwin.stat()
+        guard Darwin.fstat(srcFd, &st) == 0 else { return false }
+        let totalSize = st.st_size
+
+        let dstFd = Darwin.open(dstPath, O_CREAT | O_WRONLY | O_TRUNC, 0o644)
+        guard dstFd >= 0 else { return false }
+        defer { Darwin.close(dstFd) }
+
+        var targetSize = totalSize
+        if Darwin.ftruncate(dstFd, totalSize) != 0 {
+            targetSize = max(off_t(max(0, st.st_blocks) * 512), 1024 * 1024 * 1024)
+            if Darwin.ftruncate(dstFd, targetSize) != 0 {
+                return false
+            }
+        }
+
+        var pos: off_t = 0
+        var buffer = [UInt8](repeating: 0, count: 1024 * 1024)
+
+        while pos < targetSize {
+            let dataStart = Darwin.lseek(srcFd, pos, SEEK_DATA)
+            if dataStart < 0 || dataStart >= targetSize {
+                break
+            }
+            var holeStart = Darwin.lseek(srcFd, dataStart, SEEK_HOLE)
+            if holeStart < 0 || holeStart > targetSize {
+                holeStart = targetSize
+            }
+            _ = Darwin.lseek(dstFd, dataStart, SEEK_SET)
+            var curr = dataStart
+            while curr < holeStart {
+                let toRead = min(buffer.count, Int(holeStart - curr))
+                let bytesRead = Darwin.read(srcFd, &buffer, toRead)
+                if bytesRead <= 0 { break }
+                var written = 0
+                while written < bytesRead {
+                    let w = buffer.withUnsafeBytes { rawBuf in
+                        Darwin.write(dstFd, rawBuf.baseAddress!.advanced(by: written), bytesRead - written)
+                    }
+                    if w <= 0 {
+                        return false
+                    }
+                    written += w
+                }
+                curr += off_t(bytesRead)
+            }
+            pos = holeStart
+        }
+        return true
     }
 
     // MARK: - Lifecycle
@@ -381,12 +461,17 @@ public final class RPCServer: @unchecked Sendable {
                 name = s
             }
             stateLock.lock()
+            if vms[name] == nil {
+                stateLock.unlock()
+                reloadMachinesFromDisk()
+                stateLock.lock()
+            }
             if var vm = vms[name] {
                 vm.state = "RUNNING"
                 vm.ip_address = "192.168.138.2"
                 vms[name] = vm
-                saveMachineMetadataLocked(vm)
                 stateLock.unlock()
+                saveMachineMetadata(vm)
                 return RPCResponse(id: request.id, result: .bool(true))
             } else {
                 stateLock.unlock()
@@ -399,12 +484,17 @@ public final class RPCServer: @unchecked Sendable {
                 name = s
             }
             stateLock.lock()
+            if vms[name] == nil {
+                stateLock.unlock()
+                reloadMachinesFromDisk()
+                stateLock.lock()
+            }
             if var vm = vms[name] {
                 vm.state = "STOPPED"
                 vm.ip_address = "-"
                 vms[name] = vm
-                saveMachineMetadataLocked(vm)
                 stateLock.unlock()
+                saveMachineMetadata(vm)
                 return RPCResponse(id: request.id, result: .bool(true))
             } else {
                 stateLock.unlock()
@@ -459,10 +549,15 @@ public final class RPCServer: @unchecked Sendable {
             }
 
             stateLock.lock()
+            if vms[name] != nil {
+                stateLock.unlock()
+                return RPCResponse(id: request.id, error: RPCError(code: -1, message: "Machine '\(name)' already exists"))
+            }
+            stateLock.unlock()
+
             let machDir = machinesDirectoryURL.appendingPathComponent(name)
             let fm = FileManager.default
             if fm.fileExists(atPath: machDir.path) {
-                stateLock.unlock()
                 return RPCResponse(id: request.id, error: RPCError(code: -1, message: "Machine '\(name)' already exists"))
             }
 
@@ -472,7 +567,7 @@ public final class RPCServer: @unchecked Sendable {
                 let rootfsTemplate = cacheDir.appendingPathComponent("rootfs.ext4")
                 let ssdCache = URL(fileURLWithPath: "\(Self.resolveProjectRoot())/aerostack_runtime/cache/rootfs.ext4")
                 let templateURL = fm.fileExists(atPath: rootfsTemplate.path) ? rootfsTemplate : (fm.fileExists(atPath: ssdCache.path) ? ssdCache : nil)
-                provisionDiskImage(at: machDir.appendingPathComponent("rootfs.ext4"), templateURL: templateURL)
+                try provisionDiskImage(at: machDir.appendingPathComponent("rootfs.ext4"), templateURL: templateURL)
 
                 let initialSize = calculateMachineDirectorySize(url: machDir)
                 let newVM = VMSummary(
@@ -488,12 +583,14 @@ public final class RPCServer: @unchecked Sendable {
                     uptime_sec: 0,
                     created_at: ISO8601DateFormatter().string(from: Date())
                 )
-                saveMachineMetadataLocked(newVM)
+                saveMachineMetadata(newVM)
+
+                stateLock.lock()
                 vms[name] = newVM
                 stateLock.unlock()
                 return RPCResponse(id: request.id, result: .bool(true))
             } catch {
-                stateLock.unlock()
+                try? fm.removeItem(at: machDir)
                 return RPCResponse(id: request.id, error: RPCError(code: -1, message: "Failed to create machine: \(error.localizedDescription)"))
             }
 
@@ -503,13 +600,14 @@ public final class RPCServer: @unchecked Sendable {
                 name = s
             }
             stateLock.lock()
+            vms.removeValue(forKey: name)
+            stateLock.unlock()
+
             let machDir = machinesDirectoryURL.appendingPathComponent(name)
             let fm = FileManager.default
             if fm.fileExists(atPath: machDir.path) {
                 try? fm.removeItem(at: machDir)
             }
-            vms.removeValue(forKey: name)
-            stateLock.unlock()
             return RPCResponse(id: request.id, result: .bool(true))
 
         case "vm.clone":
@@ -526,17 +624,29 @@ public final class RPCServer: @unchecked Sendable {
             }
 
             stateLock.lock()
+            if vms[source] == nil {
+                stateLock.unlock()
+                reloadMachinesFromDisk()
+                stateLock.lock()
+            }
+            guard let srcVM = vms[source] else {
+                stateLock.unlock()
+                return RPCResponse(id: request.id, error: RPCError(code: -1, message: "Source machine '\(source)' not found"))
+            }
+            if vms[destination] != nil {
+                stateLock.unlock()
+                return RPCResponse(id: request.id, error: RPCError(code: -1, message: "Destination machine '\(destination)' already exists"))
+            }
+            stateLock.unlock()
+
             let srcDir = machinesDirectoryURL.appendingPathComponent(source)
             let dstDir = machinesDirectoryURL.appendingPathComponent(destination)
             let fm = FileManager.default
 
-            guard fm.fileExists(atPath: srcDir.path), let srcVM = vms[source] else {
-                stateLock.unlock()
-                return RPCResponse(id: request.id, error: RPCError(code: -1, message: "Source machine '\(source)' not found"))
+            guard fm.fileExists(atPath: srcDir.path) else {
+                return RPCResponse(id: request.id, error: RPCError(code: -1, message: "Source machine directory '\(srcDir.path)' not found"))
             }
-
             guard !fm.fileExists(atPath: dstDir.path) else {
-                stateLock.unlock()
                 return RPCResponse(id: request.id, error: RPCError(code: -1, message: "Destination machine '\(destination)' already exists"))
             }
 
@@ -546,14 +656,16 @@ public final class RPCServer: @unchecked Sendable {
                     for item in items {
                         let srcFile = srcDir.appendingPathComponent(item)
                         let dstFile = dstDir.appendingPathComponent(item)
-                        if item == "machine.json" {
+                        if item == "machine.json" || item == "metadata.json" {
                             continue
                         }
                         let cloneRes = clonefile(srcFile.path, dstFile.path, 0)
                         if cloneRes != 0 {
                             // Real block copy fallback (e.g. cross-volume or non-APFS)
-                            if copyfile(srcFile.path, dstFile.path, nil, copyfile_flags_t(COPYFILE_ALL)) != 0 {
-                                try? fm.copyItem(at: srcFile, to: dstFile)
+                            if !sparseCopyFile(from: srcFile.path, to: dstFile.path) {
+                                if copyfile(srcFile.path, dstFile.path, nil, copyfile_flags_t(COPYFILE_ALL)) != 0 {
+                                    try? fm.copyItem(at: srcFile, to: dstFile)
+                                }
                             }
                         }
                     }
@@ -573,12 +685,14 @@ public final class RPCServer: @unchecked Sendable {
                     uptime_sec: 0,
                     created_at: ISO8601DateFormatter().string(from: Date())
                 )
-                saveMachineMetadataLocked(clonedVM)
+                saveMachineMetadata(clonedVM)
+
+                stateLock.lock()
                 vms[destination] = clonedVM
                 stateLock.unlock()
                 return RPCResponse(id: request.id, result: .bool(true))
             } catch {
-                stateLock.unlock()
+                try? fm.removeItem(at: dstDir)
                 return RPCResponse(id: request.id, error: RPCError(code: -1, message: "Failed to clone machine: \(error.localizedDescription)"))
             }
 
@@ -794,6 +908,9 @@ public final class RPCServer: @unchecked Sendable {
         let kr = task_threads(mach_task_self_, &threadsList, &threadsCount)
         guard kr == KERN_SUCCESS, let threads = threadsList else { return 0.0 }
         defer {
+            for i in 0..<Int(threadsCount) {
+                mach_port_deallocate(mach_task_self_, threads[i])
+            }
             let size = vm_size_t(threadsCount) * vm_size_t(MemoryLayout<thread_t>.size)
             vm_deallocate(mach_task_self_, vm_address_t(bitPattern: threads), size)
         }

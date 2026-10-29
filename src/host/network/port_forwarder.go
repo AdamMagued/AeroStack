@@ -24,6 +24,7 @@ type activeForwarder struct {
 	listener net.Listener
 	udpConn  *net.UDPConn
 	stopCh   chan struct{}
+	closed   int32
 }
 
 // PortForwarder provides userspace bi-directional port forwarding between macOS and guest containers
@@ -54,6 +55,7 @@ func (pf *PortForwarder) Stop() {
 		pf.mu.Lock()
 		defer pf.mu.Unlock()
 		for _, f := range pf.rules {
+			atomic.StoreInt32(&f.closed, 1)
 			close(f.stopCh)
 			if f.listener != nil {
 				_ = f.listener.Close()
@@ -116,6 +118,20 @@ func (pf *PortForwarder) tcpAcceptLoop(f *activeForwarder) {
 			case <-pf.stopCh:
 				return
 			default:
+			}
+
+			if atomic.LoadInt32(&f.closed) != 0 || atomic.LoadInt32(&pf.running) == 0 {
+				return
+			}
+
+			// Transient accept error (e.g. EMFILE, ENFILE, ECONNABORTED, temporary net.Error)
+			log.Printf("[orb-netd:forward] Transient accept error on %s:%d: %v", f.rule.HostIP, f.rule.HostPort, err)
+			select {
+			case <-time.After(15 * time.Millisecond):
+				continue
+			case <-f.stopCh:
+				return
+			case <-pf.stopCh:
 				return
 			}
 		}
@@ -135,12 +151,22 @@ func (pf *PortForwarder) proxyTCPConnection(clientConn net.Conn, targetIP string
 	}
 	defer targetConn.Close()
 
+	var closeOnce sync.Once
+	closeBoth := func() {
+		closeOnce.Do(func() {
+			_ = clientConn.Close()
+			_ = targetConn.Close()
+		})
+	}
+	defer closeBoth()
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	// client -> target
 	go func() {
 		defer wg.Done()
+		defer closeBoth()
 		_, _ = io.Copy(targetConn, clientConn)
 		if tc, ok := targetConn.(*net.TCPConn); ok {
 			_ = tc.CloseWrite()
@@ -150,6 +176,7 @@ func (pf *PortForwarder) proxyTCPConnection(clientConn net.Conn, targetIP string
 	// target -> client
 	go func() {
 		defer wg.Done()
+		defer closeBoth()
 		_, _ = io.Copy(clientConn, targetConn)
 		if cc, ok := clientConn.(*net.TCPConn); ok {
 			_ = cc.CloseWrite()
@@ -174,6 +201,7 @@ func (pf *PortForwarder) RemoveForward(proto, hostIP string, hostPort int) error
 		return fmt.Errorf("no forwarding rule found for %s", key)
 	}
 
+	atomic.StoreInt32(&f.closed, 1)
 	close(f.stopCh)
 	if f.listener != nil {
 		_ = f.listener.Close()

@@ -76,12 +76,22 @@ func SpliceHijackedStream(clientConn net.Conn, clientBuf *bufio.Reader,
 	var bytesC2B int64
 	var bytesB2C int64
 
+	var closeOnce sync.Once
+	closeBoth := func() {
+		closeOnce.Do(func() {
+			_ = clientConn.Close()
+			_ = backendConn.Close()
+		})
+	}
+	defer closeBoth()
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	// Goroutine 1: Client -> Backend (stdin)
 	go func() {
 		defer wg.Done()
+		defer closeBoth()
 
 		// First flush any pre-buffered client bytes
 		if clientBuf != nil && clientBuf.Buffered() > 0 {
@@ -112,6 +122,7 @@ func SpliceHijackedStream(clientConn net.Conn, clientBuf *bufio.Reader,
 	// Goroutine 2: Backend -> Client (stdout/stderr)
 	go func() {
 		defer wg.Done()
+		defer closeBoth()
 
 		// First flush any pre-buffered backend bytes
 		if backendBuf != nil && backendBuf.Buffered() > 0 {

@@ -319,7 +319,6 @@ public final class OrbDaemonStore: ObservableObject {
                     "destination": .string(destination)
                 ])
                 fetchMachines()
-                performCoWDiskClone(source: source, destination: destination)
                 showToast(
                     title: "Machine '\(destination)' cloned",
                     subtitle: "Instant CoW clone from '\(source)'",
@@ -336,8 +335,11 @@ public final class OrbDaemonStore: ObservableObject {
             do {
                 _ = try await sendRPC(method: "vm.delete", params: ["name": .string(name)])
                 fetchMachines()
-                let machineDir = (settings.storage_location as NSString).appendingPathComponent(name)
+                let storageDir = (settings.storage_location as NSString).expandingTildeInPath
+                let machineDir = URL(fileURLWithPath: storageDir).appendingPathComponent("machines").appendingPathComponent(name).path
                 try? FileManager.default.removeItem(atPath: machineDir)
+                let altDir = URL(fileURLWithPath: ("~/.aerostack/data/machines" as NSString).expandingTildeInPath).appendingPathComponent(name).path
+                try? FileManager.default.removeItem(atPath: altDir)
                 showToast(title: "Machine '\(name)' deleted", type: .info)
             } catch {
                 showToast(title: "Failed to delete machine '\(name)'", subtitle: error.localizedDescription, type: .error)
@@ -611,24 +613,6 @@ public final class OrbDaemonStore: ObservableObject {
         }
     }
 
-    private func performCoWDiskClone(source: String, destination: String) {
-        let storageDir = (settings.storage_location as NSString).expandingTildeInPath
-        let srcDir = (storageDir as NSString).appendingPathComponent(source)
-        let dstDir = (storageDir as NSString).appendingPathComponent(destination)
-
-        guard FileManager.default.fileExists(atPath: srcDir) else { return }
-
-        try? FileManager.default.createDirectory(atPath: dstDir, withIntermediateDirectories: true)
-        let srcDisk = (srcDir as NSString).appendingPathComponent("disk.raw")
-        let dstDisk = (dstDir as NSString).appendingPathComponent("disk.raw")
-
-        if FileManager.default.fileExists(atPath: srcDisk) {
-            let res = Darwin.clonefile(srcDisk, dstDisk, 0)
-            if res != 0 {
-                try? FileManager.default.copyItem(atPath: srcDisk, toPath: dstDisk)
-            }
-        }
-    }
 
     private func loadFromDisk() {
         let dir = ("~/.aerostack/data/machines" as NSString).expandingTildeInPath

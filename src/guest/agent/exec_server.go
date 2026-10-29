@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -306,17 +307,41 @@ func (s *ExecServer) handlePTYExec(conn net.Conn, cmd *exec.Cmd, req ExecRequest
 		}
 	}()
 
+	done := make(chan struct{})
+	defer close(done)
+
 	// Read frames from conn (stdin and window resize)
 	go func() {
 		fHdr := make([]byte, 5)
 		for {
 			if _, err := io.ReadFull(conn, fHdr); err != nil {
+				// Client disconnected: signal and terminate orphan process
+				if cmd.Process != nil {
+					_ = cmd.Process.Signal(syscall.SIGHUP)
+					_ = cmd.Process.Signal(syscall.SIGTERM)
+					_ = ptmx.Close()
+					select {
+					case <-done:
+					case <-time.After(1 * time.Second):
+						_ = cmd.Process.Kill()
+					}
+				}
 				return
 			}
 			mType := ExecMsgType(fHdr[0])
 			pLen := binary.BigEndian.Uint32(fHdr[1:])
 			pBuf := make([]byte, pLen)
 			if _, err := io.ReadFull(conn, pBuf); err != nil {
+				if cmd.Process != nil {
+					_ = cmd.Process.Signal(syscall.SIGHUP)
+					_ = cmd.Process.Signal(syscall.SIGTERM)
+					_ = ptmx.Close()
+					select {
+					case <-done:
+					case <-time.After(1 * time.Second):
+						_ = cmd.Process.Kill()
+					}
+				}
 				return
 			}
 

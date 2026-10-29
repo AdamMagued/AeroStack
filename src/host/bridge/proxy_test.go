@@ -10,9 +10,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestPathTranslator_Translation(t *testing.T) {
@@ -140,10 +140,13 @@ func TestHijackDetection(t *testing.T) {
 }
 
 func TestDockerProxy_EndToEnd(t *testing.T) {
-	backendSock := fmt.Sprintf("/tmp/m_bk_%d.sock", time.Now().UnixNano()%1000000)
-	clientSock := fmt.Sprintf("/tmp/m_cl_%d.sock", time.Now().UnixNano()%1000000)
-	defer os.Remove(backendSock)
-	defer os.Remove(clientSock)
+	tmpDir, err := os.MkdirTemp("/tmp", "dk_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	backendSock := filepath.Join(tmpDir, "b.sock")
+	clientSock := filepath.Join(tmpDir, "c.sock")
 
 	var lastReceivedBody []byte
 
@@ -296,10 +299,13 @@ func TestPathTranslator_MountsArrayTranslation(t *testing.T) {
 }
 
 func TestDockerProxy_ContainersListNotInspect(t *testing.T) {
-	backendSock := fmt.Sprintf("/tmp/m_bk_list_%d.sock", time.Now().UnixNano()%1000000)
-	clientSock := fmt.Sprintf("/tmp/m_cl_list_%d.sock", time.Now().UnixNano()%1000000)
-	defer os.Remove(backendSock)
-	defer os.Remove(clientSock)
+	tmpDir, err := os.MkdirTemp("/tmp", "dk_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	backendSock := filepath.Join(tmpDir, "b.sock")
+	clientSock := filepath.Join(tmpDir, "c.sock")
 
 	bListener, err := net.Listen("unix", backendSock)
 	if err != nil {

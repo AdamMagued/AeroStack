@@ -124,6 +124,15 @@ func (f *DockerForwarder) proxyConn(clientConn net.Conn) {
 	defer backendConn.Close()
 	log.Printf("[orb-agent:docker] Successfully connected to dockerd at %s", f.config.DockerSockPath)
 
+	var closeOnce sync.Once
+	closeBoth := func() {
+		closeOnce.Do(func() {
+			_ = clientConn.Close()
+			_ = backendConn.Close()
+		})
+	}
+	defer closeBoth()
+
 	// Bidirectional chunk forwarding with immediate flush and logging
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -131,6 +140,7 @@ func (f *DockerForwarder) proxyConn(clientConn net.Conn) {
 	// client -> backend (macOS host -> guest dockerd)
 	go func() {
 		defer wg.Done()
+		defer closeBoth()
 		buf := make([]byte, 32*1024)
 		for {
 			nr, er := clientConn.Read(buf)
@@ -163,6 +173,7 @@ func (f *DockerForwarder) proxyConn(clientConn net.Conn) {
 	// backend -> client (guest dockerd -> macOS host)
 	go func() {
 		defer wg.Done()
+		defer closeBoth()
 		buf := make([]byte, 32*1024)
 		for {
 			nr, er := backendConn.Read(buf)

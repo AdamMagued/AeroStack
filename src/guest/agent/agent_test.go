@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net"
 	"os"
@@ -221,8 +220,12 @@ func TestExecServer_Execution(t *testing.T) {
 }
 
 func TestDockerForwarder_Proxying(t *testing.T) {
-	mockSock := fmt.Sprintf("/tmp/m_dk_%d.sock", time.Now().UnixNano()%1000000)
-	defer os.Remove(mockSock)
+	tmpDir, err := os.MkdirTemp("/tmp", "ag_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	mockSock := filepath.Join(tmpDir, "d.sock")
 
 	// Create mock docker socket server
 	mockBackend, err := net.Listen("unix", mockSock)
