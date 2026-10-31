@@ -125,7 +125,9 @@ The empirical measurements above were validated through adversarial analysis to 
 1. **Host Memory Accounting (Physical Footprint vs. RSS)**:
    - On Darwin, `ps` and `top` report Resident Set Size (`RSS`), which tracks mapped physical pages including read-only shared frameworks and dyld shared caches while excluding dirty pages compressed by Apple Silicon's hardware compressor.
    - Real memory enforcement by the Darwin kernel Jetsam mechanism uses `task_vm_info.phys_footprint` (`proc_pid_rusage.ri_phys_footprint`). This metric accounts for private internal dirty memory and compressed memory:
-     $$\text{phys\_footprint} = \text{internal} + \text{compressed} - \text{purgeable\_nonvolatile}$$
+     ```text
+     phys_footprint = internal + compressed - purgeable_nonvolatile
+     ```
    - Independent verification across three separate Darwin OS tools (`ps -o rss`, `libproc.proc_pid_rusage`, and Apple's `/usr/bin/vmmap -summary`) confirms that AeroStack's host hypervisor supervisor (`orb-vmd`) consumes **2.06 MB physical footprint (2.70 MB peak)** and **7.48 MB RSS**.
    - OrbStack Helper on the identical host registers **1,052.87 MB physical footprint** (with a peak of 9.0 GB reported by `vmmap`), despite reporting an apparent RSS of ~214 MB.
    - Total System Footprint for AeroStack is reported as **49.00 MB**, explicitly incorporating the host daemon, shared Darwin hypervisor buffers, and guest physical address (GPA) committed memory.

@@ -127,10 +127,11 @@ A critical architectural pitfall on Apple Silicon virtualization is the page siz
 
 ### 4.1 The Alignment Proof
 Let guest physical frame numbers (PFNs) be donated to the balloon driver:
-$$HVA = \text{GPA\_to\_HVA}(PFN \times 4096)$$
-As demonstrated in the disassembly of `com.apple.Virtualization.VirtualMachine`:
-$$\text{Aligned HVA} = HVA \ \& \ \sim(16384 - 1)$$
-$$\text{Aligned Length} = \lfloor (Length) / 16384 \rfloor \times 16384$$
+```text
+HVA = GPA_to_HVA(PFN * 4096)
+Aligned HVA = HVA & ~(16384 - 1)
+Aligned Length = floor(Length / 16384) * 16384
+```
 
 If the guest kernel frees an isolated 4 KB page, the hypervisor's check `cmp x1, x8; b.lo` triggers: the host **drops the request** because it cannot unmap $1/4$ of an L2/L3 host translation table entry without unmapping the other 12 KB!
 
@@ -262,23 +263,31 @@ Let $M_{\text{avail}}(t)$ be the guest available memory, $P_{\text{some}}(t)$ be
 
 #### 1. Fast Path (Scale Up / Burst):
 Trigger Condition:
-$$P_{\text{some}}(t) > 0.05\% \quad \lor \quad M_{\text{avail}}(t) < M_{\text{low\_watermark}}\text{ (50 MB)}$$
+```text
+P_some(t) > 0.05%  OR  M_avail(t) < M_low_watermark (50 MB)
+```
 Action:
-$$T(t + \Delta t) = \min\left(M_{\max}, \ T(t) + \max\left(\Delta_{\text{burst\_step}}, \ (M_{\text{low\_watermark}} - M_{\text{avail}}(t)) + M_{\text{headroom}}\right)\right)$$
-- $\Delta_{\text{burst\_step}} = 128\text{ MB}$
-- $M_{\text{headroom}} = 80\text{ MB}$
+```text
+T(t + dt) = min(M_max, T(t) + max(Delta_burst_step, (M_low_watermark - M_avail(t)) + M_headroom))
+```
+- `Delta_burst_step = 128 MB`
+- `M_headroom = 80 MB`
 - Reaction time: **< 10 milliseconds** via PSI asynchronous kernel wakeup (`poll()` on `/proc/pressure/memory`).
 
 #### 2. Slow Path (Scale Down / Reclaim):
 Trigger Condition:
-$$P_{\text{some}}(t) == 0.00\% \quad \land \quad M_{\text{avail}}(t) > (M_{\text{target\_reserve}} + \Delta_{\text{reclaim\_step}})$$
-for a continuous hold duration $t_{\text{idle}} \ge 1.0\text{ second}$.
+```text
+P_some(t) == 0.00%  AND  M_avail(t) > (M_target_reserve + Delta_reclaim_step)
+```
+for a continuous hold duration `t_idle >= 1.0 second`.
 Action:
-1. At $t_{\text{idle}} = 1.0\text{ s}$, host sends `MSG_COMPACT_COMMAND` with flags `0x3` (`compact_memory` + `drop_caches`).
-2. At $t_{\text{idle}} \ge 1.25\text{ s}$, host decrements balloon target:
-$$T(t + \Delta t) = \max\left(M_{\min}, \ T(t) - \min\left(\Delta_{\text{reclaim\_step}}, \ M_{\text{avail}}(t) - M_{\text{target\_reserve}}\right)\right)$$
-- $\Delta_{\text{reclaim\_step}} = 64\text{ MB}$ per 250 ms step.
-- $M_{\text{target\_reserve}} = 40\text{ MB}$.
+1. At `t_idle = 1.0 s`, host sends `MSG_COMPACT_COMMAND` with flags `0x3` (`compact_memory` + `drop_caches`).
+2. At `t_idle >= 1.25 s`, host decrements balloon target:
+```text
+T(t + dt) = max(M_min, T(t) - min(Delta_reclaim_step, M_avail(t) - M_target_reserve))
+```
+- `Delta_reclaim_step = 64 MB` per 250 ms step.
+- `M_target_reserve = 40 MB`.
 
 ---
 
