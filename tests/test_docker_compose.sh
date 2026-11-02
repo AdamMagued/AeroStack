@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TMP_COMPOSE_DIR="$(mktemp -d /tmp/aero_compose_XXXXXX)"
 
-VMD_PID=$(pgrep -f "orb-vmd" | head -n 1 || true)
+VMD_PID=$(pgrep -f "aero-vmd|orb-vmd" | head -n 1 || true)
 STARTED_VMD=0
 
 if [ -n "$VMD_PID" ]; then
@@ -27,7 +27,7 @@ except Exception:
     pass
 sys.exit(1)
 " 2>/dev/null; then
-        echo "Stale orb-vmd detected (PID $VMD_PID), terminating..."
+        echo "Stale aero-vmd detected (PID $VMD_PID), terminating..."
         kill -9 "$VMD_PID" 2>/dev/null || true
         VMD_PID=""
     fi
@@ -35,8 +35,10 @@ fi
 
 if [ -z "$VMD_PID" ]; then
     rm -f "$HOME/.aerostack/run/docker.sock" "$HOME/.aerostack/run/docker_backend.sock"
-    echo "--> Starting orb-vmd for Compose test..."
-    "$REPO_ROOT/build/orb-vmd" >/tmp/orb-vmd-test-compose.log 2>&1 &
+    echo "--> Starting aero-vmd for Compose test..."
+    VMD_BIN="$REPO_ROOT/build/aero-vmd"
+    [ ! -f "$VMD_BIN" ] && VMD_BIN="$REPO_ROOT/build/orb-vmd"
+    "$VMD_BIN" >/tmp/aero-vmd-test-compose.log 2>&1 &
     VMD_PID=$!
     STARTED_VMD=1
     for i in $(seq 1 120); do

@@ -15,13 +15,15 @@ trap cleanup EXIT
 
 echo "=== [TEST] Mach Physical Footprint Verification ==="
 
-# 1. Locate or start orb-vmd daemon
-VMD_PID=$(pgrep -f "orb-vmd" | head -n 1 || true)
+# 1. Locate or start aero-vmd daemon
+VMD_PID=$(pgrep -f "aero-vmd|orb-vmd" | head -n 1 || true)
 STARTED_VMD=0
 
 if [ -z "$VMD_PID" ]; then
-    echo "--> Starting orb-vmd for memory measurement..."
-    "$REPO_ROOT/build/orb-vmd" >/tmp/orb-vmd-test-mem.log 2>&1 &
+    echo "--> Starting aero-vmd for memory measurement..."
+    VMD_BIN="$REPO_ROOT/build/aero-vmd"
+    [ ! -f "$VMD_BIN" ] && VMD_BIN="$REPO_ROOT/build/orb-vmd"
+    "$VMD_BIN" >/tmp/aero-vmd-test-mem.log 2>&1 &
     VMD_PID=$!
     STARTED_VMD=1
     for i in $(seq 1 40); do
@@ -34,13 +36,13 @@ fi
 
 cleanup() {
     if [ "$STARTED_VMD" -eq 1 ]; then
-        echo "--> Stopping test orb-vmd (PID $VMD_PID)..."
+        echo "--> Stopping test aero-vmd (PID $VMD_PID)..."
         kill -15 "$VMD_PID" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT
 
-echo "--> Verified active orb-vmd daemon (PID: $VMD_PID)"
+echo "--> Verified active AeroStack daemon (PID: $VMD_PID)"
 
 # 2. Put active container load on orb-vmd via aerostack context
 if [ -S "$HOME/.aerostack/run/docker.sock" ]; then

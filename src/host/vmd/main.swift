@@ -10,7 +10,7 @@ struct OrbVMDMain {
         setlinebuf(stderr)
         print("""
         ======================================================================
-           AeroStack / OrbStack Free - Production Host Engine Daemon (orb-vmd)
+           AeroStack - Production Host Engine Daemon (aero-vmd)
            Hypervisor: macOS Virtualization.framework (Darwin 23+ / Apple Silicon)
            Target: Low-tens MB Footprint | Zero Host Polling | VirtioFS Bridge
         ======================================================================
@@ -60,7 +60,7 @@ struct OrbVMDMain {
                 shouldBoot = false
             } else if args[i] == "--help" || args[i] == "-h" {
                 print("""
-                Usage: orb-vmd [options]
+                Usage: aero-vmd [options]
                   --cache-dir <path>      Cache directory for guest assets (default: ~/.aerostack/cache)
                   --socket <path>         Control socket path (default: ~/.aerostack/run/vmcontrol.sock)
                   --docker-socket <path>  Docker socket bridge path (default: ~/.aerostack/run/docker.sock)
@@ -136,13 +136,15 @@ struct OrbVMDMain {
             shareConfigs: [
                 VMShareConfig(hostURL: URL(fileURLWithPath: "/Users"), tag: "mac_users", isReadOnly: false),
                 VMShareConfig(hostURL: URL(fileURLWithPath: "/Volumes"), tag: "mac_volumes", isReadOnly: false),
+                VMShareConfig(hostURL: URL(fileURLWithPath: "/Volumes/AdamSSD"), tag: "mac_ssd", isReadOnly: false),
                 VMShareConfig(hostURL: URL(fileURLWithPath: watchDir), tag: "orb_fs", isReadOnly: false)
             ]
         )
         let vmManager = VMManager(spec: spec)
 
         // 3. Dynamic Memory Balloon Controller with Darwin Memory Pressure
-        let balloonController = MemoryBalloonController(initialTargetMB: 512)
+        let balloonController = MemoryBalloonController(initialTargetMB: memoryMB)
+        balloonController.maxRamMB = memoryMB
         balloonController.startMonitoringMemoryPressure()
         let footprint = MemoryBalloonController.queryHostFootprint()
         print(String(format: "[MEMORY] Initial Host Footprint: %.2f MB resident, %.2f MB phys_footprint", footprint.residentMB, footprint.footprintMB))
@@ -206,8 +208,8 @@ struct OrbVMDMain {
             print("[EXEC] ERROR: Failed to bind exec bridge: \(error)")
         }
 
-        // 9. Spawn managed helper daemons (orb-docker-bridge and orb-netd)
-        if let bridgeBin = resolveBinaryPath(name: "orb-docker-bridge") {
+        // 9. Spawn managed helper daemons (aero-bridge and aero-netd, with fallback to legacy names)
+        if let bridgeBin = resolveBinaryPath(name: "aero-bridge") ?? resolveBinaryPath(name: "orb-docker-bridge") {
             let bridgeArgs = [
                 "--backend-mode", "unix",
                 "--backend-socket", backendDockerSocket,
@@ -215,7 +217,7 @@ struct OrbVMDMain {
                 "--mount-prefix", "/"
             ]
             if let p = spawnSubprocess(binaryPath: bridgeBin, arguments: bridgeArgs) {
-                print("[ENGINE] Spawned orb-docker-bridge (PID: \(p.processIdentifier))")
+                print("[ENGINE] Spawned Docker bridge daemon: \(bridgeBin) (PID: \(p.processIdentifier))")
             }
         } else {
             do {
@@ -226,13 +228,13 @@ struct OrbVMDMain {
             }
         }
 
-        if let netdBin = resolveBinaryPath(name: "orb-netd") {
+        if let netdBin = resolveBinaryPath(name: "aero-netd") ?? resolveBinaryPath(name: "orb-netd") {
             let netdArgs = [
                 "--docker-sock", dockerSocketPath,
                 "--guest-ip", "192.168.64.2"
             ]
             if let p = spawnSubprocess(binaryPath: netdBin, arguments: netdArgs) {
-                print("[ENGINE] Spawned orb-netd (PID: \(p.processIdentifier))")
+                print("[ENGINE] Spawned network daemon: \(netdBin) (PID: \(p.processIdentifier))")
             }
         }
 
@@ -324,7 +326,9 @@ struct OrbVMDMain {
         let candidates = [
             "\(root)/build/\(name)",
             Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent(name).path,
-            "/usr/local/bin/\(name)"
+            ("/opt/homebrew/bin/\(name)"),
+            ("/usr/local/bin/\(name)"),
+            (("~/.aerostack/bin/\(name)" as NSString).expandingTildeInPath)
         ]
         for c in candidates {
             if fm.fileExists(atPath: c) {

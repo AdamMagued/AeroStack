@@ -44,10 +44,10 @@ func main() {
 
 const CLIVersion = "1.0.0"
 
-// Execute runs the root command with aerostack / orb shortcut handling
+// Execute runs the root command with aerostack / aero / orb shortcut handling
 func Execute() {
 	progName := filepath.Base(os.Args[0])
-	if progName == "orb" || progName == "aerostack" || progName == "orbctl" {
+	if progName == "aero" || progName == "aeroctl" || progName == "aerostack" || progName == "orb" || progName == "orbctl" {
 		knownSubcommands := map[string]bool{
 			"create": true, "list": true, "ls": true, "ps": true,
 			"run": true, "exec": true, "shell": true,
@@ -60,8 +60,8 @@ func Execute() {
 
 		if len(os.Args) > 1 {
 			firstArg := os.Args[1]
-			if (progName == "orb" || progName == "aerostack") && !knownSubcommands[firstArg] && !strings.HasPrefix(firstArg, "-") {
-				// Prepend "run" subcommand for direct command execution (e.g. `orb uname -a` or `aerostack uname -a`)
+			if (progName == "aero" || progName == "aerostack" || progName == "orb") && !knownSubcommands[firstArg] && !strings.HasPrefix(firstArg, "-") {
+				// Prepend "run" subcommand for direct command execution (e.g. `aero uname -a` or `aerostack uname -a`)
 				newArgs := append([]string{os.Args[0], "run"}, os.Args[1:]...)
 				os.Args = newArgs
 			}
@@ -78,18 +78,21 @@ func Execute() {
 func NewRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:     "aerostack [command]",
-		Aliases: []string{"orb", "orbctl"},
+		Aliases: []string{"aero", "aeroctl", "orb", "orbctl"},
 		Short:   "Use and manage AeroStack and its machines",
 		Long: `Use and manage AeroStack and its machines.
 
-The commands can be used with "aerostack", "orbctl", or "orb".
+The commands can be used with "aerostack", "aeroctl", "aero", "orbctl", or "orb".
 
-You can also prefix commands with "aerostack" or "orb" to run them on Linux. For example:
-    aerostack uname -a
+You can also prefix commands with "aerostack" or "aero" to run them on Linux. For example:
+    aero uname -a
 will run "uname -a" on Linux, and is equivalent to:
     aerostack run uname -a`,
 		SilenceUsage: true,
 	}
+
+	rootCmd.SetOut(os.Stdout)
+	rootCmd.SetErr(os.Stderr)
 
 	rootCmd.PersistentFlags().StringVar(&socketPath, "socket", getControlSocketPath(), "Control socket path")
 
@@ -890,7 +893,7 @@ func newTopCmd() *cobra.Command {
 				}
 			}
 
-			fmt.Println("OrbStack Free Activity Monitor")
+			fmt.Println("AeroStack Activity Monitor")
 			fmt.Println("--------------------------------")
 			fmt.Printf("CPU Usage:    %.1f%% host / %.1f%% guest\n", m.HostCPUPercent, m.GuestCPUPercent)
 			fmt.Printf("Memory:       %d MB used / %d MB limit (%d MB freed by balloon)\n",
@@ -908,7 +911,7 @@ func newTopCmd() *cobra.Command {
 func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
-		Short: "Check if OrbStack is properly configured and in control",
+		Short: "Check if AeroStack is properly configured and in control",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client := newRPCClient(socketPath)
 			var report DoctorReportDTO
@@ -917,7 +920,7 @@ func newDoctorCmd() *cobra.Command {
 				report = runLocalDoctorChecks()
 			}
 
-			fmt.Println("OrbStack Free Doctor Diagnostic Report:")
+			fmt.Println("AeroStack Doctor Diagnostic Report:")
 			for _, check := range report.Checks {
 				symbol := "[OK]"
 				if !check.OK {
@@ -1045,7 +1048,7 @@ func newConfigCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "config [flags]",
-		Short: "Change OrbStack settings",
+		Short: "Change AeroStack settings",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client := newRPCClient(socketPath)
 			var cfg OrbSettingsDTO
@@ -1084,7 +1087,7 @@ func newConfigCmd() *cobra.Command {
 				return nil
 			}
 
-			fmt.Println("OrbStack Free Configuration:")
+			fmt.Println("AeroStack Configuration:")
 			fmt.Printf("  cpus: %d\n", cfg.MaxCPUs)
 			fmt.Printf("  memory: %dMB\n", cfg.MaxMemoryMB)
 			fmt.Printf("  disk_size: %dGB\n", cfg.MaxDiskGB)
@@ -1107,7 +1110,7 @@ func newConfigCmd() *cobra.Command {
 func newStatusCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Check whether OrbStack is running",
+		Short: "Check whether AeroStack is running",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client := newRPCClient(socketPath)
 			conn, err := net.DialTimeout("unix", client.socketPath, 500*time.Millisecond)

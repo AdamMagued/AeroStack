@@ -31,7 +31,7 @@ func main() {
 	flag.Parse()
 
 	if *versionFlag {
-		fmt.Printf("orb-docker-bridge v%s (macOS Host Socket Bridge)\n", BridgeVersion)
+		fmt.Printf("aero-bridge v%s (macOS Host Socket Bridge)\n", BridgeVersion)
 		return
 	}
 
@@ -53,7 +53,7 @@ func main() {
 	}
 
 	log.Printf("==================================================================")
-	log.Printf(" Starting orb-docker-bridge v%s", BridgeVersion)
+	log.Printf(" Starting aero-bridge v%s", BridgeVersion)
 	log.Printf(" Backend: %s (Prefix: %s)", *backendMode, *mountPrefix)
 	log.Printf("==================================================================")
 

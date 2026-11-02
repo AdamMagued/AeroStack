@@ -25,12 +25,12 @@ func main() {
 	flag.Parse()
 
 	if *versionFlag {
-		fmt.Printf("orb-agent v%s (Linux ARM64 Static)\n", AgentVersion)
+		fmt.Printf("aero-agent v%s (Linux ARM64 Static)\n", AgentVersion)
 		return
 	}
 
 	log.Printf("==================================================================")
-	log.Printf(" Starting orb-agent v%s (Linux ARM64 Guest Control Plane)", AgentVersion)
+	log.Printf(" Starting aero-agent v%s (Linux ARM64 Guest Control Plane)", AgentVersion)
 	log.Printf("==================================================================")
 
 	// 1. Initialize Memory Reclaimer

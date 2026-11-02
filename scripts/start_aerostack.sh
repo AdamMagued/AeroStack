@@ -1,0 +1,39 @@
+#!/bin/bash
+# ==============================================================================
+# AeroStack Daemon Launcher
+# Starts orb-vmd in the background and verifies readiness.
+# ==============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+AERO_SOCK="${HOME}/.aerostack/run/docker.sock"
+VM_SOCK="${HOME}/.aerostack/run/vmcontrol.sock"
+LOG_DIR="${HOME}/.aerostack/log"
+mkdir -p "$LOG_DIR"
+
+if pgrep -f "aero-vmd|orb-vmd" >/dev/null 2>&1 && [ -S "$AERO_SOCK" ]; then
+    echo "AeroStack is already running."
+    exit 0
+fi
+
+VMD_BIN="$REPO_ROOT/build/aero-vmd"
+if [ ! -f "$VMD_BIN" ]; then
+    VMD_BIN="$REPO_ROOT/build/orb-vmd"
+fi
+
+echo "Starting AeroStack daemon (aero-vmd)..."
+nohup "$VMD_BIN" > "$LOG_DIR/aero-vmd.log" 2>&1 &
+VMD_PID=$!
+echo "AeroStack started with PID $VMD_PID. Waiting for sockets..."
+
+for i in $(seq 1 40); do
+    if [ -S "$AERO_SOCK" ] && [ -S "$VM_SOCK" ]; then
+        echo "AeroStack is ready! Docker socket: $AERO_SOCK"
+        exit 0
+    fi
+    sleep 0.25
+done
+
+echo "Timed out waiting for AeroStack sockets. Check $LOG_DIR/aero-vmd.log"
+exit 1

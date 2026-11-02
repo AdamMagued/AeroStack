@@ -2,13 +2,15 @@
 import PackageDescription
 
 let package = Package(
-    name: "orbstack_free",
+    name: "AeroStack",
     platforms: [
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "orb-vmd", targets: ["orb-vmd"]),
-        .executable(name: "orb-gui", targets: ["orb-gui"]),
+        .executable(name: "aero-vmd", targets: ["aero-vmd"]),
+        .executable(name: "aero-gui", targets: ["aero-gui"]),
+        .executable(name: "orb-vmd", targets: ["aero-vmd"]),
+        .executable(name: "orb-gui", targets: ["aero-gui"]),
         .library(name: "OrbEngine", targets: ["OrbEngine"]),
     ],
     targets: [
@@ -17,12 +19,12 @@ let package = Package(
             path: "src/host/engine"
         ),
         .executableTarget(
-            name: "orb-vmd",
+            name: "aero-vmd",
             dependencies: ["OrbEngine"],
             path: "src/host/vmd"
         ),
         .executableTarget(
-            name: "orb-gui",
+            name: "aero-gui",
             dependencies: ["OrbEngine"],
             path: "src/host/gui"
         ),

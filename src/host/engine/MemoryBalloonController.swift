@@ -207,9 +207,7 @@ public final class MemoryBalloonController: @unchecked Sendable {
             self.stateLock.lock()
             self.lastTelemetry = telemetry
             let availMB = telemetry.availRamBytes / (1024 * 1024)
-            let activeTargetMB = self.balloonDevice?.targetVirtualMachineMemorySize != nil 
-                ? (self.balloonDevice!.targetVirtualMachineMemorySize / (1024 * 1024))
-                : self.currentTargetMB
+            let activeTargetMB = self.currentTargetMB
             let psiSome = Double(telemetry.psiSomeAvg10) / 100.0
             self.stateLock.unlock()
 

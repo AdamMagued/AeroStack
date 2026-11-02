@@ -220,6 +220,9 @@ public final class RPCServer: @unchecked Sendable {
             if availBytes < requiredBytes {
                 throw NSError(domain: "RPCServer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Insufficient disk space: required \(requiredBytes / (1024 * 1024)) MB, available \(availBytes / (1024 * 1024)) MB"])
             }
+            if Darwin.clonefile(template.path, targetURL.path, 0) == 0 {
+                return
+            }
             if sparseCopyFile(from: template.path, to: targetURL.path) {
                 return
             }
@@ -588,9 +591,9 @@ public final class RPCServer: @unchecked Sendable {
             do {
                 try fm.createDirectory(at: machDir, withIntermediateDirectories: true)
                 let cacheDir = URL(fileURLWithPath: ("~/.aerostack/cache" as NSString).expandingTildeInPath)
-                let rootfsTemplate = cacheDir.appendingPathComponent("rootfs.ext4")
-                let ssdCache = URL(fileURLWithPath: "\(Self.resolveProjectRoot())/aerostack_runtime/cache/rootfs.ext4")
-                let templateURL = fm.fileExists(atPath: rootfsTemplate.path) ? rootfsTemplate : (fm.fileExists(atPath: ssdCache.path) ? ssdCache : nil)
+                let distroTemplate = cacheDir.appendingPathComponent("rootfs-\(distro.lowercased()).ext4")
+                let ssdDistroTemplate = URL(fileURLWithPath: "\(Self.resolveProjectRoot())/aerostack_runtime/cache/rootfs-\(distro.lowercased()).ext4")
+                let templateURL = fm.fileExists(atPath: distroTemplate.path) ? distroTemplate : (fm.fileExists(atPath: ssdDistroTemplate.path) ? ssdDistroTemplate : nil)
                 try provisionDiskImage(at: machDir.appendingPathComponent("rootfs.ext4"), templateURL: templateURL)
 
                 let initialSize = calculateMachineDirectorySize(url: machDir)

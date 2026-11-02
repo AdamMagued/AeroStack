@@ -157,6 +157,9 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
         if !shares.contains(where: { $0.tag == "mac_volumes" }) && FileManager.default.fileExists(atPath: "/Volumes") {
             shares.append(VMShareConfig(hostURL: URL(fileURLWithPath: "/Volumes"), tag: "mac_volumes", isReadOnly: false))
         }
+        if !shares.contains(where: { $0.tag == "mac_ssd" }) && FileManager.default.fileExists(atPath: "/Volumes/AdamSSD") {
+            shares.append(VMShareConfig(hostURL: URL(fileURLWithPath: "/Volumes/AdamSSD"), tag: "mac_ssd", isReadOnly: false))
+        }
         for share in shares {
             if FileManager.default.fileExists(atPath: share.hostURL.path) {
                 let sharedDir = VZSharedDirectory(url: share.hostURL, readOnly: share.isReadOnly)
@@ -418,6 +421,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
     // MARK: - VZVirtualMachineDelegate
 
     public func guestDidStop(_ virtualMachine: VZVirtualMachine) {
+        print("[ENGINE] guestDidStop called by Virtualization.framework (guest stopped or halted)")
         stateLock.withLock {
             self.startedAt = nil
             self.ipAddress = "-"
@@ -426,6 +430,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
     }
 
     public func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
+        print("[ENGINE] virtualMachine didStopWithError: \(error)")
         stateLock.withLock {
             self.startedAt = nil
             self.ipAddress = "-"

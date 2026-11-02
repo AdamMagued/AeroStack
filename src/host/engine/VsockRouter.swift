@@ -15,7 +15,7 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
 
     private var listeners: [UInt32: VZVirtioSocketListener] = [:]
     private var activeConnections: [Int32: VZVirtioSocketConnection] = [:]
-    private let routerQueue = DispatchQueue(label: "com.orbstack_free.vsock_router", qos: .userInteractive)
+    private let routerQueue = DispatchQueue(label: "com.orbstack_free.vsock_router", attributes: .concurrent)
     private let routerLock = NSLock()
     private var isSimulated: Bool = false
 
@@ -275,7 +275,7 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
         Darwin.listen(tcpFd, 128)
         print("[EXEC] Host vsock exec bridge listening on 127.0.0.1:\(tcpPort)")
 
-        routerQueue.async { [weak self] in
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             while true {
                 var clientAddr = sockaddr_in()
                 var clientLen = socklen_t(MemoryLayout<sockaddr_in>.size)
@@ -330,7 +330,7 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
                     chmod(uPath, 0o666)
                     print("[EXEC] Host vsock exec bridge listening on unix://\(uPath)")
 
-                    routerQueue.async { [weak self] in
+                    DispatchQueue.global(qos: .userInteractive).async { [weak self] in
                         while true {
                             var clientAddr = sockaddr_un()
                             var clientLen = socklen_t(MemoryLayout<sockaddr_un>.size)

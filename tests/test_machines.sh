@@ -12,18 +12,20 @@ ORBCTL="$BUILD_DIR/orbctl"
 mkdir -p "$BUILD_DIR"
 
 echo "=== [TEST] Building orbctl binary ==="
-go build -o "$ORBCTL" "$REPO_ROOT/src/host/cli/"
+(cd "$REPO_ROOT" && GOCACHE="$REPO_ROOT/.gocache" GOPATH="$REPO_ROOT/.gopath" go build -o "$ORBCTL" ./src/host/cli)
 
 DATA_DIR="${HOME}/.aerostack/data/machines"
 rm -rf "$DATA_DIR/test-ci-ubuntu" "$DATA_DIR/test-ci-ubuntu-clone" "$DATA_DIR/._test-ci-ubuntu"* 2>/dev/null || true
 
-VMD_PID=$(pgrep -f "orb-vmd" | head -n 1 || true)
+VMD_PID=$(pgrep -f "aero-vmd|orb-vmd" | head -n 1 || true)
 STARTED_VMD=0
 
 if [ -z "$VMD_PID" ]; then
-    echo "--> Starting orb-vmd --no-boot for machine lifecycle test..."
+    echo "--> Starting aero-vmd --no-boot for machine lifecycle test..."
     mkdir -p "${HOME}/.aerostack/run"
-    "$BUILD_DIR/orb-vmd" --no-boot >/tmp/orb-vmd-test-machines.log 2>&1 &
+    VMD_BIN="$BUILD_DIR/aero-vmd"
+    [ ! -f "$VMD_BIN" ] && VMD_BIN="$BUILD_DIR/orb-vmd"
+    "$VMD_BIN" --no-boot >/tmp/aero-vmd-test-machines.log 2>&1 &
     VMD_PID=$!
     STARTED_VMD=1
     for i in $(seq 1 40); do

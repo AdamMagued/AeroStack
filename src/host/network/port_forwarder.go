@@ -1,10 +1,15 @@
 package main
 
 import (
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -143,14 +148,26 @@ func (pf *PortForwarder) tcpAcceptLoop(f *activeForwarder) {
 func (pf *PortForwarder) proxyTCPConnection(clientConn net.Conn, targetIP string, targetPort int) {
 	defer clientConn.Close()
 
+	// 1. Try direct TCP connection with a quick timeout (succeeds for host-to-host or accessible networks)
 	targetAddr := fmt.Sprintf("%s:%d", targetIP, targetPort)
-	targetConn, err := net.DialTimeout("tcp", targetAddr, 2*time.Second)
-	if err != nil {
-		log.Printf("[orb-netd:forward] Failed to dial backend %s: %v", targetAddr, err)
+	dialTimeout := 200 * time.Millisecond
+	if targetIP == "127.0.0.1" || targetIP == "localhost" {
+		dialTimeout = 2 * time.Second
+	}
+	targetConn, err := net.DialTimeout("tcp", targetAddr, dialTimeout)
+	if err == nil {
+		defer targetConn.Close()
+		pf.spliceTCP(clientConn, targetConn)
 		return
 	}
-	defer targetConn.Close()
 
+	// 2. Fallback to AeroStack vsock exec bridge when direct NAT connection fails
+	if err := pf.proxyViaExecBridge(clientConn, targetPort); err != nil {
+		log.Printf("[orb-netd:forward] Failed to proxy %s:%d (direct dial: %v, vsock: %v)", targetIP, targetPort, err, err)
+	}
+}
+
+func (pf *PortForwarder) spliceTCP(clientConn, targetConn net.Conn) {
 	var closeOnce sync.Once
 	closeBoth := func() {
 		closeOnce.Do(func() {
@@ -194,6 +211,129 @@ func (pf *PortForwarder) proxyTCPConnection(clientConn net.Conn, targetIP string
 	}()
 
 	wg.Wait()
+}
+
+func (pf *PortForwarder) proxyViaExecBridge(clientConn net.Conn, targetPort int) error {
+	home, _ := os.UserHomeDir()
+	execSock := filepath.Join(home, ".aerostack", "run", "exec.sock")
+	var execConn net.Conn
+	var err error
+
+	if _, statErr := os.Stat(execSock); statErr == nil {
+		execConn, err = net.DialTimeout("unix", execSock, 2*time.Second)
+	} else {
+		execConn, err = net.DialTimeout("tcp", "127.0.0.1:8022", 2*time.Second)
+	}
+	if err != nil {
+		return fmt.Errorf("connect to exec bridge failed: %w", err)
+	}
+	defer execConn.Close()
+
+	var closeOnce sync.Once
+	closeBoth := func() {
+		closeOnce.Do(func() {
+			_ = clientConn.Close()
+			_ = execConn.Close()
+		})
+	}
+	defer closeBoth()
+
+	// Prepare ExecRequest for "nc 127.0.0.1 <targetPort>" inside guest
+	req := map[string]interface{}{
+		"command": []string{"nc", "127.0.0.1", strconv.Itoa(targetPort)},
+		"tty":     false,
+	}
+	reqBytes, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+
+	// Send ExecMsgRequest (type 1)
+	hdr := make([]byte, 5)
+	hdr[0] = 1 // ExecMsgRequest
+	binary.BigEndian.PutUint32(hdr[1:], uint32(len(reqBytes)))
+	if _, err := execConn.Write(hdr); err != nil {
+		return err
+	}
+	if _, err := execConn.Write(reqBytes); err != nil {
+		return err
+	}
+
+	// Read ExecResponse
+	respHdr := make([]byte, 5)
+	if _, err := io.ReadFull(execConn, respHdr); err != nil {
+		return err
+	}
+	respLen := binary.BigEndian.Uint32(respHdr[1:])
+	respBody := make([]byte, respLen)
+	if _, err := io.ReadFull(execConn, respBody); err != nil {
+		return err
+	}
+	var initResp struct {
+		Started bool   `json:"started"`
+		Error   string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(respBody, &initResp); err == nil && !initResp.Started && initResp.Error != "" {
+		return fmt.Errorf("remote exec init error: %s", initResp.Error)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Pump clientConn -> execConn (wrapping data in ExecMsgDataStdin frames)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 8192)
+		for {
+			n, rerr := clientConn.Read(buf)
+			if n > 0 {
+				inHdr := make([]byte, 5+n)
+				inHdr[0] = 3 // ExecMsgDataStdin
+				binary.BigEndian.PutUint32(inHdr[1:], uint32(n))
+				copy(inHdr[5:], buf[:n])
+				if _, werr := execConn.Write(inHdr); werr != nil {
+					closeBoth()
+					return
+				}
+			}
+			if rerr != nil {
+				// Send EOF frame
+				eofHdr := make([]byte, 5)
+				eofHdr[0] = 8 // ExecMsgStdinEOF
+				binary.BigEndian.PutUint32(eofHdr[1:], 0)
+				_, _ = execConn.Write(eofHdr)
+				return
+			}
+		}
+	}()
+
+	// Pump execConn -> clientConn (unwrapping ExecMsgDataStdout frames)
+	go func() {
+		defer wg.Done()
+		fHdr := make([]byte, 5)
+		for {
+			if _, err := io.ReadFull(execConn, fHdr); err != nil {
+				break
+			}
+			mType := fHdr[0]
+			pLen := binary.BigEndian.Uint32(fHdr[1:])
+			pBuf := make([]byte, pLen)
+			if _, err := io.ReadFull(execConn, pBuf); err != nil {
+				break
+			}
+			if mType == 4 { // ExecMsgDataStdout
+				if _, err := clientConn.Write(pBuf); err != nil {
+					break
+				}
+			} else if mType == 7 { // ExecMsgExitStatus
+				break
+			}
+		}
+		closeBoth()
+	}()
+
+	wg.Wait()
+	return nil
 }
 
 // RemoveForward terminates a forwarding rule

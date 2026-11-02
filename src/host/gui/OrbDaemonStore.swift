@@ -95,17 +95,23 @@ public final class OrbDaemonStore: ObservableObject {
         let envRoot = ProcessInfo.processInfo.environment["AEROSTACK_WORKSPACE"]
         var candidates: [String] = []
         if let root = envRoot {
+            candidates.append("\(root)/build/aero-vmd")
             candidates.append("\(root)/build/orb-vmd")
         }
         candidates.append(contentsOf: [
+            Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("aero-vmd").path,
             Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("orb-vmd").path,
+            "\(home)/.aerostack/bin/aero-vmd",
             "\(home)/.aerostack/bin/orb-vmd",
+            "/opt/homebrew/bin/aero-vmd",
+            "/usr/local/bin/aero-vmd",
             "/usr/local/bin/orb-vmd",
+            "/Volumes/AdamSSD/antigravity_workspace/orbstack_free/build/aero-vmd",
             "/Volumes/AdamSSD/antigravity_workspace/orbstack_free/build/orb-vmd"
         ])
 
         guard let binaryPath = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-            showToast(title: "Cannot locate orb-vmd", subtitle: "Please run 'make all' first", type: .error)
+            showToast(title: "Cannot locate aero-vmd", subtitle: "Please run 'make all' first", type: .error)
             return
         }
 
@@ -127,7 +133,7 @@ public final class OrbDaemonStore: ObservableObject {
                 }
             }
         } catch {
-            showToast(title: "Failed to launch orb-vmd", subtitle: error.localizedDescription, type: .error)
+            showToast(title: "Failed to launch aero-vmd", subtitle: error.localizedDescription, type: .error)
         }
     }
 

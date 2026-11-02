@@ -24,23 +24,24 @@ echo "--> 1. Running Zero-Stubs & Zero-Emojis Verification..."
 
 # 3. Go Full Package Test Suite
 echo "--> 2. Running Go Test Suite across all packages..."
-GOCACHE="$REPO_ROOT/.gocache" GOPATH="$REPO_ROOT/.gopath" \
-go test -v -count=1 "$REPO_ROOT/src/..."
+(cd "$REPO_ROOT" && GOCACHE="$REPO_ROOT/.gocache" GOPATH="$REPO_ROOT/.gopath" \
+go test -v -count=1 ./src/...)
 
 # 4. Swift Host Engine Unit Tests
 echo "--> 3. Running Swift Host Engine Tests..."
 export COPYFILE_DISABLE=1
 find "$BUILD_DIR" -name "._*" -delete 2>/dev/null || true
-swift build --build-tests --scratch-path "$BUILD_DIR" 2>&1 | grep -v "CodeSign" || true
-swift build -c release --product orb-vmd --scratch-path "$BUILD_DIR" 2>&1 | grep -v "CodeSign" || true
-RELEASE_BIN=$(find "$BUILD_DIR" -type f -name "orb-vmd" -path "*/Release/*" 2>/dev/null | head -n 1)
+(cd "$REPO_ROOT" && swift build --build-tests --scratch-path "$BUILD_DIR" 2>&1 | grep -v "CodeSign" || true)
+(cd "$REPO_ROOT" && swift build -c release --product aero-vmd --scratch-path "$BUILD_DIR" 2>&1 | grep -v "CodeSign" || true)
+RELEASE_BIN=$(find "$BUILD_DIR" -type f -name "aero-vmd" -path "*/Release/*" 2>/dev/null | head -n 1)
 if [ -n "$RELEASE_BIN" ] && [ -f "$RELEASE_BIN" ]; then
     mkdir -p "$REPO_ROOT/build"
-    cp "$RELEASE_BIN" "$REPO_ROOT/build/orb-vmd"
+    cp "$RELEASE_BIN" "$REPO_ROOT/build/aero-vmd"
+    ln -sf aero-vmd "$REPO_ROOT/build/orb-vmd"
     find "$REPO_ROOT/build" -name "._*" -delete 2>/dev/null || true
     if [ -f "$REPO_ROOT/build/entitlements.plist" ]; then
-        codesign --remove-signature "$REPO_ROOT/build/orb-vmd" 2>/dev/null || true
-        codesign --force --sign - --entitlements "$REPO_ROOT/build/entitlements.plist" "$REPO_ROOT/build/orb-vmd" 2>/dev/null || true
+        codesign --remove-signature "$REPO_ROOT/build/aero-vmd" 2>/dev/null || true
+        codesign --force --sign - --entitlements "$REPO_ROOT/build/entitlements.plist" "$REPO_ROOT/build/aero-vmd" 2>/dev/null || true
     fi
 fi
 find "$BUILD_DIR/out/Products/Debug/OrbEngineTests.xctest" -name "._*" -delete 2>/dev/null || true

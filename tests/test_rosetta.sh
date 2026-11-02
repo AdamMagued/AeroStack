@@ -57,12 +57,14 @@ echo "PASSED (guest init registers binfmt_misc ELF x86_64 translator)"
 
 # 4. Empirical verification: execute amd64 container binary via aerostack context
 echo -n "Executing empirical x86_64 binary via aerostack: "
-VMD_PID=$(pgrep -f "orb-vmd" | head -n 1 || true)
+VMD_PID=$(pgrep -f "aero-vmd|orb-vmd" | head -n 1 || true)
 STARTED_VMD=0
 
 if [ -z "$VMD_PID" ]; then
-    echo "--> Starting orb-vmd for Rosetta test..."
-    "$REPO_ROOT/build/orb-vmd" >/tmp/orb-vmd-test-rosetta.log 2>&1 &
+    echo "--> Starting aero-vmd for Rosetta test..."
+    VMD_BIN="$REPO_ROOT/build/aero-vmd"
+    [ ! -f "$VMD_BIN" ] && VMD_BIN="$REPO_ROOT/build/orb-vmd"
+    "$VMD_BIN" >/tmp/aero-vmd-test-rosetta.log 2>&1 &
     VMD_PID=$!
     STARTED_VMD=1
     for i in $(seq 1 40); do

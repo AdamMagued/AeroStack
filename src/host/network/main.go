@@ -27,12 +27,12 @@ func main() {
 	flag.Parse()
 
 	if *versionFlag {
-		fmt.Printf("orb-netd v%s (Userspace Network & DNS Engine)\n", NetdVersion)
+		fmt.Printf("aero-netd v%s (Userspace Network & DNS Engine)\n", NetdVersion)
 		return
 	}
 
 	log.Printf("==================================================================")
-	log.Printf(" Starting orb-netd v%s (Userspace Network & DNS Engine)", NetdVersion)
+	log.Printf(" Starting aero-netd v%s (Userspace Network & DNS Engine)", NetdVersion)
 	log.Printf(" Router IP: %s | Guest IP: %s | DNS Bind: %s | Upstream: %s", *routerIP, *guestIP, *dnsBind, *upstreamDNS)
 	log.Printf("==================================================================")
 

@@ -12,6 +12,7 @@
 build/
 bin/
 dist/
+release_dist/
 main
 *.o
 *.obj

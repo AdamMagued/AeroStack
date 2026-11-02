@@ -14,7 +14,7 @@ find "$REPO_ROOT" -name "._*" -delete 2>/dev/null || true
 
 # 2. Run Network & DockerPortWatcher Unit Tests
 echo "--> 1. Running DockerPortWatcher and PortForwarder unit tests..."
-GOCACHE="$REPO_ROOT/.gocache" GOPATH="$REPO_ROOT/.gopath" \
-go test -v "$REPO_ROOT/src/host/network/..."
+(cd "$REPO_ROOT" && GOCACHE="$REPO_ROOT/.gocache" GOPATH="$REPO_ROOT/.gopath" \
+go test -v ./src/host/network/...)
 
 echo "=== [TEST] Container Port Forwarding Verification PASSED 100% ==="
