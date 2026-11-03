@@ -473,3 +473,114 @@ func socketPair() (net.Conn, net.Conn, error) {
 	return c1, res.c, nil
 }
 
+func TestIsDockerSocket(t *testing.T) {
+	cases := []struct {
+		path     string
+		expected bool
+	}{
+		{"/var/run/docker.sock", true},
+		{"/Users/alice/.aerostack/run/docker.sock", true},
+		{"/Users/alice/.orbstack/run/docker.sock", true},
+		{"/Users/alice/.docker/run/docker.sock", true},
+		{"/tmp/docker.sock", true},
+		{"/var/run/other.sock", false},
+		{"/Users/alice/docker.sock.bak", false},
+		{"/Users/alice/.aerostack/run/containerd.sock", false},
+	}
+	for _, tc := range cases {
+		if got := isDockerSocket(tc.path); got != tc.expected {
+			t.Errorf("isDockerSocket(%q) = %v, expected %v", tc.path, got, tc.expected)
+		}
+	}
+}
+
+func TestPathTranslator_DockerSocketTranslation(t *testing.T) {
+	pt := NewPathTranslator("/mnt/mac")
+
+	socketPaths := []string{
+		"/Users/alice/.aerostack/run/docker.sock",
+		"/Users/alice/.orbstack/run/docker.sock",
+		"/Users/alice/.docker/run/docker.sock",
+		"/var/run/docker.sock",
+		"/custom/path/to/docker.sock",
+	}
+
+	for _, p := range socketPaths {
+		translated := pt.HostToGuest(p)
+		if translated != "/var/run/docker.sock" {
+			t.Fatalf("HostToGuest(%q) = %q, expected /var/run/docker.sock", p, translated)
+		}
+	}
+
+	if rev := pt.GuestToHost("/var/run/docker.sock"); rev != "/var/run/docker.sock" {
+		t.Fatalf("GuestToHost(/var/run/docker.sock) = %q, expected /var/run/docker.sock", rev)
+	}
+
+	// Verify workspace translator mode also maps host socket to guest /var/run/docker.sock
+	ptWorkspace := NewPathTranslator("/workspace")
+	for _, p := range socketPaths {
+		translated := ptWorkspace.HostToGuest(p)
+		if translated != "/var/run/docker.sock" {
+			t.Fatalf("ptWorkspace.HostToGuest(%q) = %q, expected /var/run/docker.sock", p, translated)
+		}
+	}
+
+	createReq := []byte(`{
+		"Image": "alpine",
+		"HostConfig": {
+			"Binds": [
+				"/Users/alice/.aerostack/run/docker.sock:/var/run/docker.sock",
+				"/Users/alice/.orbstack/run/docker.sock:/var/run/docker.sock:ro"
+			],
+			"Mounts": [
+				{
+					"Type": "bind",
+					"Source": "/Users/alice/.docker/run/docker.sock",
+					"Target": "/var/run/docker.sock"
+				}
+			]
+		}
+	}`)
+
+	rewritten, err := pt.TranslateContainerCreateRequestBody(createReq)
+	if err != nil {
+		t.Fatalf("TranslateContainerCreateRequestBody failed: %v", err)
+	}
+
+	var parsed struct {
+		HostConfig struct {
+			Binds  []string `json:"Binds"`
+			Mounts []struct {
+				Type   string `json:"Type"`
+				Source string `json:"Source"`
+				Target string `json:"Target"`
+			} `json:"Mounts"`
+		} `json:"HostConfig"`
+	}
+
+	if err := json.Unmarshal(rewritten, &parsed); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+
+	expectedBinds := []string{
+		"/var/run/docker.sock:/var/run/docker.sock",
+		"/var/run/docker.sock:/var/run/docker.sock:ro",
+	}
+	if len(parsed.HostConfig.Binds) != len(expectedBinds) {
+		t.Fatalf("Expected %d binds, got %d", len(expectedBinds), len(parsed.HostConfig.Binds))
+	}
+	for i, b := range parsed.HostConfig.Binds {
+		if b != expectedBinds[i] {
+			t.Fatalf("Bind[%d] = %q, expected %q", i, b, expectedBinds[i])
+		}
+	}
+
+	if len(parsed.HostConfig.Mounts) != 1 {
+		t.Fatalf("Expected 1 mount, got %d", len(parsed.HostConfig.Mounts))
+	}
+	if parsed.HostConfig.Mounts[0].Source != "/var/run/docker.sock" {
+		t.Fatalf("Mount Source = %q, expected /var/run/docker.sock", parsed.HostConfig.Mounts[0].Source)
+	}
+}
+
+

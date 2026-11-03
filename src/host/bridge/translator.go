@@ -61,12 +61,34 @@ func (pt *PathTranslator) AddMapping(hostPath, guestPath string) {
 	}
 }
 
+// isDockerSocket returns true if path refers to a Docker daemon UNIX socket.
+func isDockerSocket(path string) bool {
+	clean := filepath.Clean(path)
+	if clean == "/var/run/docker.sock" {
+		return true
+	}
+	if strings.HasSuffix(clean, "/.aerostack/run/docker.sock") ||
+		strings.HasSuffix(clean, "/.orbstack/run/docker.sock") ||
+		strings.HasSuffix(clean, "/.docker/run/docker.sock") {
+		return true
+	}
+	if filepath.Base(clean) == "docker.sock" {
+		return true
+	}
+	return false
+}
+
 // HostToGuest translates a macOS host path to Linux VM VirtioFS path.
 func (pt *PathTranslator) HostToGuest(hostPath string) string {
 	clean := filepath.Clean(hostPath)
 
-	// Docker socket and kernel pseudo filesystems are unmodified
-	if clean == "/var/run/docker.sock" || strings.HasPrefix(clean, "/proc") || strings.HasPrefix(clean, "/sys") {
+	// Docker socket translates directly to guest socket path
+	if isDockerSocket(clean) {
+		return "/var/run/docker.sock"
+	}
+
+	// Kernel pseudo filesystems are unmodified
+	if strings.HasPrefix(clean, "/proc") || strings.HasPrefix(clean, "/sys") {
 		return clean
 	}
 
@@ -103,8 +125,8 @@ func (pt *PathTranslator) HostToGuest(hostPath string) string {
 func (pt *PathTranslator) GuestToHost(guestPath string) string {
 	clean := filepath.Clean(guestPath)
 
-	if clean == "/var/run/docker.sock" {
-		return clean
+	if isDockerSocket(clean) {
+		return "/var/run/docker.sock"
 	}
 
 	// 1. Check explicit custom reverse mappings (prioritizing longest prefix match)
