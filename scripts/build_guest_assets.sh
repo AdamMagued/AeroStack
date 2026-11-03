@@ -246,52 +246,93 @@ if mount -t virtiofs rosetta /run/rosetta 2>/dev/null || mount -t virtiofs roset
     fi
 fi
 
-# Start containerd
-mkdir -p /var/run /var/log /var/lib/docker
-containerd --config /etc/containerd/config.toml >/dev/kmsg 2>&1 &
-echo "[AERO-INIT] containerd service active."
+# Supervised Daemons (Self-Healing Process Supervision)
+mkdir -p /var/run /var/log /var/lib/docker /var/run/containerd /run/containerd
 
-# Start dockerd
-dockerd --debug -H unix:///var/run/docker.sock --config-file /etc/docker/daemon.json >/dev/kmsg 2>&1 &
-echo "[AERO-INIT] dockerd daemon launched with debug logging."
+# 1. Supervise containerd
+supervise_containerd() {
+    while true; do
+        echo "[AERO-SUPERVISOR] Starting containerd daemon..." >/dev/kmsg
+        containerd --config /etc/containerd/config.toml >/dev/kmsg 2>&1 || true
+        echo "[AERO-SUPERVISOR] containerd exited unexpectedly. Clearing stale sockets/pids and restarting in 2s..." >/dev/kmsg
+        rm -f /run/containerd/containerd.sock /var/run/containerd/containerd.sock /run/containerd.pid /var/run/containerd.pid 2>/dev/null || true
+        sleep 2
+    done
+}
+supervise_containerd &
+echo "[AERO-INIT] containerd supervisor active."
 
-# Poll for dockerd Unix domain socket
-for i in $(seq 1 200); do
-    if [ -S /var/run/docker.sock ]; then
-        echo "[AERO-INIT] Docker daemon socket ready: /var/run/docker.sock"
+# Wait for containerd socket
+for i in $(seq 1 100); do
+    if [ -S /run/containerd/containerd.sock ] || [ -S /var/run/containerd/containerd.sock ]; then
+        echo "[AERO-INIT] containerd socket is ready." >/dev/kmsg
         break
     fi
     sleep 0.1
 done
 
-# Preload container images into dockerd
+# 2. Supervise dockerd
+supervise_dockerd() {
+    while true; do
+        echo "[AERO-SUPERVISOR] Starting dockerd daemon..." >/dev/kmsg
+        dockerd --debug -H unix:///var/run/docker.sock --config-file /etc/docker/daemon.json >/dev/kmsg 2>&1 || true
+        echo "[AERO-SUPERVISOR] dockerd exited unexpectedly. Clearing stale sockets/pids and restarting in 2s..." >/dev/kmsg
+        rm -f /var/run/docker.sock /run/docker.sock /var/run/docker.pid /run/docker.pid /var/run/docker/containerd/containerd.sock 2>/dev/null || true
+        sleep 2
+    done
+}
+supervise_dockerd &
+echo "[AERO-INIT] dockerd supervisor active."
+
+# Poll for dockerd Unix domain socket and responsive engine
+for i in $(seq 1 200); do
+    if [ -S /var/run/docker.sock ] && docker version >/dev/null 2>&1; then
+        echo "[AERO-INIT] Docker daemon socket and engine ready: /var/run/docker.sock" >/dev/kmsg
+        break
+    fi
+    sleep 0.1
+done
+
+# Preload container images into dockerd (one-time initialization)
 if [ -f /var/lib/docker-preload/alpine.tar ]; then
-    echo "[AERO-INIT] Preloading alpine image into dockerd..."
+    echo "[AERO-INIT] Preloading alpine image into dockerd..." >/dev/kmsg
     docker load -i /var/lib/docker-preload/alpine.tar >/dev/kmsg 2>&1 || true
-    echo "[AERO-INIT] Alpine image preload completed."
+    echo "[AERO-INIT] Alpine image preload completed." >/dev/kmsg
 fi
 if [ -f /var/lib/docker-preload/pr-sandbox.tar ]; then
-    echo "[AERO-INIT] Preloading pr-sandbox image into dockerd..."
+    echo "[AERO-INIT] Preloading pr-sandbox image into dockerd..." >/dev/kmsg
     docker load -i /var/lib/docker-preload/pr-sandbox.tar >/dev/kmsg 2>&1 || true
     rm -f /var/lib/docker-preload/pr-sandbox.tar
-    echo "[AERO-INIT] pr-sandbox image preload completed."
+    echo "[AERO-INIT] pr-sandbox image preload completed." >/dev/kmsg
 fi
 
-# Start AeroStack guest agent
-if [ -f /usr/local/bin/orb-agent ]; then
-    echo "[AERO-INIT] Starting AeroStack guest agent..."
-    /usr/local/bin/orb-agent \
-        -docker-sock /var/run/docker.sock \
-        -mount-root /workspace \
-        -mem-port 1024 \
-        -fs-port 9922 \
-        -exec-port 8022 \
-        -docker-port 2375 >/dev/kmsg 2>&1 &
-fi
+# 3. Supervise AeroStack guest agent (orb-agent)
+supervise_orb_agent() {
+    while true; do
+        if [ -f /usr/local/bin/orb-agent ]; then
+            echo "[AERO-SUPERVISOR] Starting AeroStack guest agent (orb-agent)..." >/dev/kmsg
+            /usr/local/bin/orb-agent \
+                -docker-sock /var/run/docker.sock \
+                -mount-root /workspace \
+                -mem-port 1024 \
+                -fs-port 9922 \
+                -exec-port 8022 \
+                -docker-port 2375 >/dev/kmsg 2>&1 || true
+            echo "[AERO-SUPERVISOR] orb-agent exited. Clearing stale sockets/pids and restarting in 2s..." >/dev/kmsg
+            rm -f /var/run/orb-agent.pid /run/orb-agent.pid 2>/dev/null || true
+        else
+            echo "[AERO-SUPERVISOR] /usr/local/bin/orb-agent missing, waiting 2s..." >/dev/kmsg
+        fi
+        sleep 2
+    done
+}
+supervise_orb_agent &
+echo "[AERO-INIT] orb-agent supervisor active."
 
 echo "[AERO-INIT] MicroVM guest fully initialized and operational."
 while true; do
-    sleep 3600
+    sleep 3600 &
+    wait $! 2>/dev/null || true
 done
 EOF_INIT
 

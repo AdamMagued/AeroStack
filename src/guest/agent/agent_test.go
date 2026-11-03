@@ -284,6 +284,42 @@ func TestDockerForwarder_Proxying(t *testing.T) {
 	}
 }
 
+func TestDockerForwarder_BackendUnreachable_502(t *testing.T) {
+	// Point to a non-existent dockerd socket path
+	fwd := NewDockerForwarder(DockerForwarderConfig{
+		DockerSockPath: "/tmp/non_existent_dockerd_test.sock",
+	})
+	fwdListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to listen fwd: %v", err)
+	}
+	fwd.listener = fwdListener
+	fwd.running = 1
+	fwd.wg.Add(1)
+	go fwd.acceptLoop()
+	defer fwd.Stop()
+
+	// Dial forwarder
+	client, err := net.Dial("tcp", fwdListener.Addr().String())
+	if err != nil {
+		t.Fatalf("Failed to dial forwarder: %v", err)
+	}
+	defer client.Close()
+
+	_, _ = client.Write([]byte("GET /_ping HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+	resp, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatalf("Failed to read from client: %v", err)
+	}
+
+	if !bytes.Contains(resp, []byte("502 Bad Gateway")) {
+		t.Fatalf("Expected 502 Bad Gateway, got: %q", string(resp))
+	}
+	if !bytes.Contains(resp, []byte("dockerd unreachable")) {
+		t.Fatalf("Expected 'dockerd unreachable', got: %q", string(resp))
+	}
+}
+
 func TestExecServer_PTYAllocation(t *testing.T) {
 	server := NewExecServer(ExecServerConfig{ListenPort: 0})
 	l, err := net.Listen("tcp", "127.0.0.1:0")

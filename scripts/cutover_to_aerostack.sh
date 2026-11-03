@@ -20,16 +20,24 @@ echo "======================================================================"
 find "$REPO_ROOT" -name "._*" -delete 2>/dev/null || true
 
 # 2. Pre-flight verification
-echo "--> 1. Verifying AeroStack daemon and socket..."
+echo "--> 1. Verifying AeroStack daemon, socket, and dockerd responsiveness..."
 if [ ! -S "$AERO_SOCK" ]; then
     echo "ERROR: AeroStack socket not found at $AERO_SOCK"
     echo "Ensure aero-vmd daemon is running."
     exit 1
 fi
 
-AERO_VERSION=$(docker --context aerostack version --format '{{.Server.Version}}' 2>/dev/null || echo "")
+if ! DOCKER_HOST="unix://$AERO_SOCK" docker version >/dev/null 2>&1; then
+    echo "ERROR: AeroStack socket exists at $AERO_SOCK, but dockerd is not responding."
+    exit 1
+fi
+
+docker context create aerostack --docker "host=unix://$AERO_SOCK" >/dev/null 2>&1 || \
+docker context update aerostack --docker "host=unix://$AERO_SOCK" >/dev/null 2>&1 || true
+
+AERO_VERSION=$(DOCKER_HOST="unix://$AERO_SOCK" docker version --format '{{.Server.Version}}' 2>/dev/null || echo "")
 if [ -z "$AERO_VERSION" ]; then
-    echo "ERROR: Unable to communicate with AeroStack Docker daemon via context 'aerostack'."
+    echo "ERROR: Unable to communicate with AeroStack Docker daemon."
     exit 1
 fi
 echo "    Connected to AeroStack Engine (version: ${AERO_VERSION})"

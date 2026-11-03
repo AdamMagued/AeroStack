@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+const (
+	http502BadGatewayResponse = "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: 20\r\n\r\ndockerd unreachable\n"
+)
+
 // DockerForwarderConfig holds configuration for the guest Docker vsock forwarder
 type DockerForwarderConfig struct {
 	VsockPort      uint32
@@ -120,6 +124,21 @@ func (f *DockerForwarder) proxyConn(clientConn net.Conn) {
 	backendConn, err := dialer.Dial("unix", f.config.DockerSockPath)
 	if err != nil {
 		log.Printf("[orb-agent:docker] ERROR: Failed to connect to dockerd at %s: %v", f.config.DockerSockPath, err)
+		_, _ = clientConn.Write([]byte(http502BadGatewayResponse))
+		// Drain unread request bytes and half-close write end to prevent TCP/vsock RST
+		if conn, ok := clientConn.(interface{ SetReadDeadline(time.Time) error }); ok {
+			_ = conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+			drainBuf := make([]byte, 1024)
+			for {
+				nr, er := clientConn.Read(drainBuf)
+				if nr == 0 || er != nil {
+					break
+				}
+			}
+		}
+		if cw, ok := clientConn.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
 		return
 	}
 	defer backendConn.Close()
