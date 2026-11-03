@@ -114,6 +114,10 @@ struct OrbVMDMain {
             }
         }
 
+        // Ensure rootfs disk image meets minimum capacity (16 GiB) for container images and workloads
+        let minRootfsBytes: Int64 = 16 * 1024 * 1024 * 1024
+        ensureMinimumDiskSize(atPath: rootfsPath, minSize: minRootfsBytes)
+
         print("[ENGINE] Verified guest assets:")
         print("  Kernel:   \(kernelPath) (\(fileSize(atPath: kernelPath)))")
         print("  Initrd:   \(initrdPath) (\(fileSize(atPath: initrdPath)))")
@@ -351,6 +355,69 @@ struct OrbVMDMain {
             print("[ENGINE] Warning: Failed to spawn \(binaryPath): \(error)")
             return nil
         }
+    }
+
+    private static func ensureMinimumDiskSize(atPath path: String, minSize: Int64) {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: path) else { return }
+
+        guard let attrs = try? fm.attributesOfItem(atPath: path),
+              let currentSize = attrs[.size] as? Int64 else {
+            print("[ENGINE] Warning: Unable to query attributes for disk image at \(path)")
+            return
+        }
+
+        if currentSize >= minSize {
+            return
+        }
+
+        let currentMB = Double(currentSize) / (1024.0 * 1024.0)
+        let minGB = Double(minSize) / (1024.0 * 1024.0 * 1024.0)
+        print(String(format: "[ENGINE] Expanding rootfs image %@ (%.1f MB) to minimum size %.1f GB...", path, currentMB, minGB))
+
+        let fd = Darwin.open(path, O_RDWR)
+        guard fd >= 0 else {
+            print("[ENGINE] Warning: Failed to open rootfs image for expansion (\(path)): \(String(cString: strerror(errno)))")
+            return
+        }
+        defer { Darwin.close(fd) }
+
+        // Attempt 1: Fast ftruncate
+        if Darwin.ftruncate(fd, minSize) == 0 {
+            print(String(format: "[ENGINE] Successfully resized rootfs image to %.1f GB via ftruncate.", minGB))
+            return
+        }
+
+        let truncateErr = errno
+        print("[ENGINE] Notice: ftruncate failed (\(String(cString: strerror(truncateErr)))), falling back to zero-block append for ExFAT compatibility...")
+
+        // Attempt 2: Fallback for filesystems (like ExFAT on macOS) where ftruncate fails >8GB with ENOSPC
+        if Darwin.lseek(fd, 0, SEEK_END) == -1 {
+            print("[ENGINE] Warning: lseek SEEK_END failed on \(path): \(String(cString: strerror(errno)))")
+            return
+        }
+
+        let chunkSize = 8 * 1024 * 1024 // 8 MB chunks
+        let zeroBuffer = [UInt8](repeating: 0, count: chunkSize)
+        var bytesToAppend = minSize - currentSize
+        let startTime = Date()
+
+        while bytesToAppend > 0 {
+            let writeSize = Int(min(bytesToAppend, Int64(chunkSize)))
+            let written = zeroBuffer.withUnsafeBytes { rawPtr in
+                Darwin.write(fd, rawPtr.baseAddress, writeSize)
+            }
+            if written <= 0 {
+                let writeErr = errno
+                print("[ENGINE] Warning: Failed to append zero chunk to rootfs: \(String(cString: strerror(writeErr)))")
+                return
+            }
+            bytesToAppend -= Int64(written)
+        }
+
+        _ = Darwin.fsync(fd)
+        let elapsed = Date().timeIntervalSince(startTime)
+        print(String(format: "[ENGINE] Successfully expanded rootfs image to %.1f GB via zero block append in %.2fs.", minGB, elapsed))
     }
 
     private static func fileSize(atPath path: String) -> String {

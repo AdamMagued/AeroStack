@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_DIR="${1:-${PROJECT_DIR}/build}"
 CACHE_DIR="${AEROSTACK_CACHE_DIR:-${2:-${PROJECT_DIR}/aerostack_runtime/cache}}"
-ROOTFS_SIZE="${AEROSTACK_ROOTFS_SIZE:-${3:-10G}}"
+ROOTFS_SIZE="${AEROSTACK_ROOTFS_SIZE:-${3:-16G}}"
 
 mkdir -p "${BUILD_DIR}" "${CACHE_DIR}"
 
