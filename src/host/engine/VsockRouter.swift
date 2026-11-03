@@ -80,6 +80,7 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
             return true
 
         case Self.dockerPort:
+            memoryController?.requestActivityBurst()
             onDockerConnection?(connection)
             return true
 
@@ -221,6 +222,7 @@ public final class VsockRouter: NSObject, VZVirtioSocketListenerDelegate, @unche
                 }
                 guard clientFd >= 0 else { continue }
                 print("[DOCKER] Incoming connection accepted on clientFd: \(clientFd)")
+                self?.memoryController?.requestActivityBurst()
 
                 Task {
                     guard let self = self else {

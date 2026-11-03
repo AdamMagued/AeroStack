@@ -129,9 +129,9 @@ final class OrbEngineTests: XCTestCase {
 
     func testMemoryBalloonBurstOnPSIStall() {
         let mockDevice = MockBalloonDevice()
-        mockDevice.targetVirtualMachineMemorySize = 512 * 1024 * 1024
+        mockDevice.targetVirtualMachineMemorySize = 2048 * 1024 * 1024
 
-        let controller = MemoryBalloonController(balloonDevice: mockDevice, initialTargetMB: 512)
+        let controller = MemoryBalloonController(balloonDevice: mockDevice, initialTargetMB: 2048)
         controller.burstStepMB = 256
 
         let exp = expectation(description: "Burst target adjusted")
@@ -147,26 +147,26 @@ final class OrbEngineTests: XCTestCase {
             msgType: MemMessageType.telemetryReport.rawValue,
             totalRamBytes: 4096 * 1024 * 1024,
             freeRamBytes: 30 * 1024 * 1024,
-            availRamBytes: 40 * 1024 * 1024, // below 50MB watermark
-            psiSomeAvg10: 650,               // 6.50% stall
+            availRamBytes: 100 * 1024 * 1024, // below 256MB watermark
+            psiSomeAvg10: 650,                // 6.50% stall
             psiFullAvg10: 200
         )
 
         controller.handleTelemetry(telemetry: telemetry)
         wait(for: [exp], timeout: 2.0)
 
-        XCTAssertGreaterThan(mockDevice.targetVirtualMachineMemorySize, 512 * 1024 * 1024)
+        XCTAssertGreaterThan(mockDevice.targetVirtualMachineMemorySize, 2048 * 1024 * 1024)
         XCTAssertEqual(controller.idleTicks, 0)
     }
 
     func testMemoryBalloonSlowCompactionAndReclaim() {
         let mockDevice = MockBalloonDevice()
-        mockDevice.targetVirtualMachineMemorySize = 512 * 1024 * 1024
+        mockDevice.targetVirtualMachineMemorySize = 3072 * 1024 * 1024
 
-        let controller = MemoryBalloonController(balloonDevice: mockDevice, initialTargetMB: 512)
+        let controller = MemoryBalloonController(balloonDevice: mockDevice, initialTargetMB: 3072)
         controller.idleHoldThresholdTicks = 2
         controller.reclaimStepMB = 64
-        controller.targetIdleReserveMB = 40
+        controller.targetIdleReserveMB = 256
 
         var compactionFired = false
         var stepDownFired = false
@@ -188,8 +188,8 @@ final class OrbEngineTests: XCTestCase {
             magic: VSOCK_MEM_MAGIC,
             msgType: MemMessageType.telemetryReport.rawValue,
             totalRamBytes: 4096 * 1024 * 1024,
-            freeRamBytes: 300 * 1024 * 1024,
-            availRamBytes: 350 * 1024 * 1024, // > 40 + 64
+            freeRamBytes: 500 * 1024 * 1024,
+            availRamBytes: 600 * 1024 * 1024, // > 256 + 64
             psiSomeAvg10: 0,
             psiFullAvg10: 0
         )
@@ -204,7 +204,27 @@ final class OrbEngineTests: XCTestCase {
         wait(for: [exp], timeout: 2.0)
         XCTAssertTrue(compactionFired)
         XCTAssertTrue(stepDownFired)
-        XCTAssertLessThan(mockDevice.targetVirtualMachineMemorySize, 512 * 1024 * 1024)
+        XCTAssertLessThan(mockDevice.targetVirtualMachineMemorySize, 3072 * 1024 * 1024)
+        XCTAssertGreaterThanOrEqual(mockDevice.targetVirtualMachineMemorySize, 2048 * 1024 * 1024)
+    }
+
+    func testMemoryBalloonActivityBurst() {
+        let mockDevice = MockBalloonDevice()
+        mockDevice.targetVirtualMachineMemorySize = 2048 * 1024 * 1024
+
+        let controller = MemoryBalloonController(balloonDevice: mockDevice, initialTargetMB: 2048)
+        let exp = expectation(description: "Activity burst fired")
+        controller.sendControlFrameHandler = { frame in
+            if frame.msgType == MemMessageType.setTargetAck.rawValue {
+                exp.fulfill()
+            }
+        }
+
+        controller.requestActivityBurst()
+        wait(for: [exp], timeout: 2.0)
+
+        XCTAssertEqual(controller.currentTargetMB, 4096)
+        XCTAssertEqual(mockDevice.targetVirtualMachineMemorySize, 4096 * 1024 * 1024)
     }
 
     func testDarwinHostFootprintQuery() {

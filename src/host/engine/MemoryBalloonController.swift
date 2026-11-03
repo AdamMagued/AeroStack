@@ -80,7 +80,7 @@ public struct HostControlFrame: Sendable {
         msgType: UInt8 = MemMessageType.compactCommand.rawValue,
         flags: UInt8 = 0x3,
         reserved: UInt16 = 0,
-        targetRamBytes: UInt64 = 48 * 1024 * 1024
+        targetRamBytes: UInt64 = 2048 * 1024 * 1024
     ) {
         self.magic = magic
         self.msgType = msgType
@@ -116,10 +116,10 @@ public final class MemoryBalloonController: @unchecked Sendable {
     public weak var balloonDevice: MemoryBalloonDeviceProtocol?
 
     // Tuning Parameters
-    public var minRamMB: UInt64 = 48
+    public var minRamMB: UInt64 = 2048
     public var maxRamMB: UInt64 = 8192
-    public var lowWatermarkAvailMB: UInt64 = 50
-    public var targetIdleReserveMB: UInt64 = 40
+    public var lowWatermarkAvailMB: UInt64 = 256
+    public var targetIdleReserveMB: UInt64 = 256
     public var burstStepMB: UInt64 = 128
     public var reclaimStepMB: UInt64 = 64
     public var idleHoldThresholdTicks: Int = 4 // 1.0s at 250ms cadence
@@ -128,7 +128,7 @@ public final class MemoryBalloonController: @unchecked Sendable {
     public private(set) var idleTicks: Int = 0
     public private(set) var compactionRequested: Bool = false
     public private(set) var lastTelemetry: GuestTelemetryFrame?
-    public private(set) var currentTargetMB: UInt64 = 512
+    public private(set) var currentTargetMB: UInt64 = 2048
 
     public var sendControlFrameHandler: ((HostControlFrame) -> Void)?
 
@@ -137,7 +137,7 @@ public final class MemoryBalloonController: @unchecked Sendable {
     public var vmQueue: DispatchQueue?
     private var pressureSource: (any DispatchSourceMemoryPressure)?
 
-    public init(balloonDevice: MemoryBalloonDeviceProtocol? = nil, initialTargetMB: UInt64 = 512) {
+    public init(balloonDevice: MemoryBalloonDeviceProtocol? = nil, initialTargetMB: UInt64 = 2048) {
         self.balloonDevice = balloonDevice
         self.currentTargetMB = initialTargetMB
         if let dev = balloonDevice {
@@ -170,7 +170,7 @@ public final class MemoryBalloonController: @unchecked Sendable {
     public func handleHostMemoryPressure(event: DispatchSource.MemoryPressureEvent) {
         print("[MEMORY] Darwin host memory pressure event: \(event). Inflating Virtio balloon and dropping guest caches.")
         stateLock.lock()
-        let pressureTargetMB = self.minRamMB
+        let pressureTargetMB = max(self.minRamMB, 1536)
         self.currentTargetMB = pressureTargetMB
         self.updateBalloonTarget(bytes: pressureTargetMB * 1024 * 1024)
         self.compactionRequested = true
@@ -218,7 +218,7 @@ public final class MemoryBalloonController: @unchecked Sendable {
                 self.compactionRequested = false
 
                 let neededMB = (self.lowWatermarkAvailMB > availMB ? (self.lowWatermarkAvailMB - availMB) : 0) + self.burstStepMB
-                let newTargetMB = min(self.maxRamMB, activeTargetMB + neededMB)
+                let newTargetMB = max(self.minRamMB, min(self.maxRamMB, activeTargetMB + neededMB))
                 
                 if newTargetMB > activeTargetMB {
                     self.currentTargetMB = newTargetMB
@@ -281,6 +281,32 @@ public final class MemoryBalloonController: @unchecked Sendable {
             } else {
                 self.stateLock.lock()
                 self.idleTicks = 0
+                self.stateLock.unlock()
+            }
+        }
+    }
+
+    /// Request an immediate memory burst when high-throughput socket activity (e.g. Docker API) begins
+    public func requestActivityBurst() {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.stateLock.lock()
+            self.idleTicks = 0
+            self.compactionRequested = false
+            let burstTargetMB = min(self.maxRamMB, max(self.currentTargetMB, 4096))
+            let activeTargetMB = self.currentTargetMB
+            if burstTargetMB > activeTargetMB {
+                self.currentTargetMB = burstTargetMB
+                self.updateBalloonTarget(bytes: burstTargetMB * 1024 * 1024)
+                self.stateLock.unlock()
+
+                let ackFrame = HostControlFrame(
+                    msgType: MemMessageType.setTargetAck.rawValue,
+                    flags: 0,
+                    targetRamBytes: burstTargetMB * 1024 * 1024
+                )
+                self.sendControlFrameHandler?(ackFrame)
+            } else {
                 self.stateLock.unlock()
             }
         }

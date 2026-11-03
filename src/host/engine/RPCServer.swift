@@ -574,6 +574,7 @@ public final class RPCServer: @unchecked Sendable {
                     else if let m = Int(cleaned) { memoryMB = m }
                 }
             }
+            memoryMB = max(2048, memoryMB)
 
             stateLock.lock()
             if vms[name] != nil {

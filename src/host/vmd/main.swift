@@ -55,7 +55,7 @@ struct OrbVMDMain {
             } else if args[i] == "--cpus" && i + 1 < args.count {
                 if let c = Int(args[i + 1]) { cpus = c }
             } else if args[i] == "--memory" && i + 1 < args.count {
-                if let m = UInt64(args[i + 1]) { memoryMB = m }
+                if let m = UInt64(args[i + 1]) { memoryMB = max(2048, m) }
             } else if args[i] == "--no-boot" {
                 shouldBoot = false
             } else if args[i] == "--help" || args[i] == "-h" {
@@ -76,6 +76,8 @@ struct OrbVMDMain {
                 return
             }
         }
+
+        memoryMB = max(2048, memoryMB)
 
         print("[ENGINE] Cache directory: \(cacheDir)")
         print("[ENGINE] Docker socket: \(dockerSocketPath)")
@@ -148,6 +150,7 @@ struct OrbVMDMain {
 
         // 3. Dynamic Memory Balloon Controller with Darwin Memory Pressure
         let balloonController = MemoryBalloonController(initialTargetMB: memoryMB)
+        balloonController.minRamMB = 2048
         balloonController.maxRamMB = memoryMB
         balloonController.startMonitoringMemoryPressure()
         let footprint = MemoryBalloonController.queryHostFootprint()

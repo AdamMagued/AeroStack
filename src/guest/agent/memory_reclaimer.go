@@ -61,7 +61,7 @@ type MemoryReclaimerConfig struct {
 	HostPort          uint32
 	ReportInterval    time.Duration
 	AlertThresholdPSI uint32 // Default 500 (5.0%)
-	LowMemThresholdMB uint64 // Default 50 MB
+	LowMemThresholdMB uint64 // Default 256 MB
 }
 
 // MemoryReclaimer monitors guest memory pressure and communicates with host balloon engine
@@ -102,13 +102,13 @@ func NewMemoryReclaimer(cfg MemoryReclaimerConfig) *MemoryReclaimer {
 		cfg.HostPort = 1024
 	}
 	if cfg.ReportInterval == 0 {
-		cfg.ReportInterval = 250 * time.Millisecond
+		cfg.ReportInterval = 500 * time.Millisecond
 	}
 	if cfg.AlertThresholdPSI == 0 {
 		cfg.AlertThresholdPSI = 500 // 5.0% stall
 	}
 	if cfg.LowMemThresholdMB == 0 {
-		cfg.LowMemThresholdMB = 50
+		cfg.LowMemThresholdMB = 256
 	}
 
 	return &MemoryReclaimer{

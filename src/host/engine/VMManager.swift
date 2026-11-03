@@ -117,7 +117,7 @@ public final class VMManager: NSObject, VZVirtualMachineDelegate, @unchecked Sen
         let targetCPU = max(minCPU, min(spec.cpuCount, maxCPU))
         config.cpuCount = targetCPU
 
-        let minMem = VZVirtualMachineConfiguration.minimumAllowedMemorySize
+        let minMem = max(UInt64(2048 * 1024 * 1024), VZVirtualMachineConfiguration.minimumAllowedMemorySize)
         let maxMem = VZVirtualMachineConfiguration.maximumAllowedMemorySize
         let targetMem = max(minMem, min(spec.memoryBytes, maxMem))
         config.memorySize = targetMem
